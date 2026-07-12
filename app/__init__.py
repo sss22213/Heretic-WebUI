@@ -1,0 +1,1 @@
+"""Heretic WebUI application package."""

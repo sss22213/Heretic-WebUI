@@ -1,0 +1,5 @@
+# llama.cpp's full converter requirements pin CPU PyTorch, Transformers 4 and
+# NumPy 1. Heretic already supplies compatible CUDA PyTorch, Transformers 5,
+# NumPy, safetensors and tokenizers; only these extras are needed for conversion.
+sentencepiece>=0.1.98,<0.3.0
+protobuf>=4.21.0,<5.0.0

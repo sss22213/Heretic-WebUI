@@ -1,0 +1,31 @@
+services:
+  webui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: heretic-webui:local
+    ports:
+      - "8000:8000"
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /data/huggingface
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/data
+      - ./outputs:/outputs
+      - ./models:/models:ro
+    shm_size: "16gb"
+    ipc: host
+    init: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped

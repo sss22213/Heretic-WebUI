@@ -1,0 +1,42 @@
+diff --git a/src/heretic/main.py b/src/heretic/main.py
+index 5ae3a31..4da33d5 100644
+--- a/src/heretic/main.py
++++ b/src/heretic/main.py
+@@ -1015,9 +1015,36 @@ def run():
+                             else:
+                                 print("Saving merged model...")
+                                 merged_model = model.get_merged_model()
++                                save_kwargs: dict[str, Any] = {
++                                    "max_shard_size": settings.max_shard_size,
++                                }
++
++                                # Transformers 5.x converts Gemma 4 Unified's
++                                # internal multimodal parameter names back to
++                                # their Hub checkpoint names before writing.
++                                # For an offloaded model, save_pretrained() then
++                                # tries to retrieve meta tensors using those
++                                # converted names, which do not exist as module
++                                # attributes (for example
++                                # embed_vision.embedding_projection). Saving in
++                                # the current Transformers layout avoids that
++                                # invalid lookup and remains loadable through
++                                # from_pretrained().
++                                device_map = getattr(merged_model, "hf_device_map", {})
++                                is_offloaded = any(
++                                    device in ("cpu", "disk")
++                                    for device in device_map.values()
++                                )
++                                if (
++                                    getattr(merged_model.config, "model_type", None)
++                                    == "gemma4_unified"
++                                    and is_offloaded
++                                ):
++                                    save_kwargs["save_original_format"] = False
++
+                                 merged_model.save_pretrained(
+                                     save_directory,
+-                                    max_shard_size=settings.max_shard_size,
++                                    **save_kwargs,
+                                 )
+                                 del merged_model
+                                 empty_cache()
