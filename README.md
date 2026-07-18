@@ -99,7 +99,7 @@ Only one GPU-intensive Heretic job is allowed at a time. Jobs continue running a
 
 ## Ollama Import
 
-The **Models & Ollama** page lists complete merged outputs from `./outputs`. Supported architectures can be uploaded directly as Safetensors through the Ollama blob API. Architectures that cannot be imported reliably in that form, including the integrated Gemma 4 Unified path, are converted to GGUF inside the WebUI container first.
+The **Models & Ollama** page lists complete merged outputs from `./outputs`. Supported architectures can be uploaded directly as Safetensors through the Ollama blob API. Architectures that cannot be imported reliably in that form, including Gemma 4 Unified and the Qwen3.5/3.6 family, are converted to GGUF inside the WebUI container first. Explicitly selecting Safetensors for a combination known to produce an unloadable model (such as Qwen3.5/3.6 on Ollama 0.31.2) is rejected before any upload starts.
 
 Available quantization options are:
 
@@ -133,7 +133,9 @@ outputs/.gguf/<output-name>/
 
 Conversion writes to `.partial` files and renames them atomically after success. Incomplete files are never reused after an interruption. The large BF16 intermediate is deleted after quantization by default, but it can be retained when you plan to create additional quantization variants.
 
-The Docker image builds `llama-quantize` from llama.cpp. The default llama.cpp revision is pinned to commit `e3546c7948e3af463d0b401e6421d5a4c2faf565`, which has been verified with `Gemma4UnifiedForConditionalGeneration`. Override it with:
+Multimodal outputs such as the Qwen3.5/3.6 VL family are converted text-only: vision tower tensors are skipped by the converter and image input is not available in the resulting Ollama model. When `config.json` advertises multi-token-prediction layers (`mtp_num_hidden_layers`), the conversion automatically passes `--no-mtp`, because Heretic's Transformers round-trip drops the `mtp.*` head tensors and a GGUF that still declares them cannot be loaded.
+
+The Docker image builds `llama-quantize` from llama.cpp. The default llama.cpp revision is pinned to commit `e3546c7948e3af463d0b401e6421d5a4c2faf565`, which has been verified with `Gemma4UnifiedForConditionalGeneration` and `Qwen3_5ForConditionalGeneration`. Override it with:
 
 ```bash
 docker compose build --build-arg LLAMA_CPP_REF=master webui
@@ -154,8 +156,12 @@ Full-model imports support these Modelfile directives:
 - `SYSTEM`
 - `LICENSE`
 - `MESSAGE`
+- `RENDERER`
+- `PARSER`
 
 The backend validates the Modelfile and converts it into fields accepted by Ollama's `/api/create` endpoint. The source model is selected separately in the UI, so `FROM` must remain `.` for full-output imports. `ADAPTER` is handled through the dedicated LoRA workflow instead.
+
+`RENDERER` and `PARSER` select one of Ollama's built-in chat renderers and response parsers (for example `RENDERER qwen3.5` with `PARSER qwen3.5`). For new architectures Ollama does not assign a renderer automatically on GGUF import, so without these directives (or a hand-written `TEMPLATE`) the model falls back to the raw `{{ .Prompt }}` template. Using the native renderer also enables correct thinking-content parsing for reasoning models.
 
 ## LoRA Management
 

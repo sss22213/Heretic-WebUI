@@ -30,7 +30,7 @@ docker compose logs -f webui
 
 ## 匯入 Ollama
 
-「匯入 Ollama」頁面會列出 `outputs` 中權重完整的合併模型。一般架構可透過 Ollama API 直接上傳 Safetensors；Gemma 4 Unified 等 Ollama 無法直接辨識的架構，會自動在 WebUI Container 內使用 llama.cpp 轉成 BF16 GGUF，再依選項量化為 2-bit `Q2_K`、3-bit `Q3_K_M`、4-bit `Q4_K_M`、6-bit `Q6_K` 或 8-bit `Q8_0`，最後以相同的 blob API 傳送。Ollama 可以位於另一個 Container，兩邊不需要共享模型 volume。
+「匯入 Ollama」頁面會列出 `outputs` 中權重完整的合併模型。一般架構可透過 Ollama API 直接上傳 Safetensors；Gemma 4 Unified 與 Qwen3.5/3.6 系列等 Ollama 無法可靠匯入的架構，會自動在 WebUI Container 內使用 llama.cpp 轉成 BF16 GGUF，再依選項量化為 2-bit `Q2_K`、3-bit `Q3_K_M`、4-bit `Q4_K_M`、6-bit `Q6_K` 或 8-bit `Q8_0`，最後以相同的 blob API 傳送。若手動強制選擇 Safetensors，而該組合已知會產生無法載入的模型（例如 Ollama 0.31.2 搭配 Qwen3.5/3.6），會在上傳前直接拒絕並說明原因。Ollama 可以位於另一個 Container，兩邊不需要共享模型 volume。
 
 預設連線到 `http://host.docker.internal:11434`。請讓 Ollama Container 對主機發布 `11434` port，或在 `.env` 將 `OLLAMA_BASE_URL` 改成兩個 Container 都能解析的同一 Docker network 位址，例如：
 
@@ -42,7 +42,9 @@ OLLAMA_BASE_URL=http://ollama:11434
 
 GGUF 產物暫存在 `outputs/.gguf/<output-name>/`。轉換先寫入 `.partial`，成功後才原子改名；服務中斷後不會沿用不完整檔案。量化完成後預設刪除大型 BF16 中間檔，也可以在頁面勾選保留，方便日後產生不同量化。轉換尖峰空間約為原始模型大小加上量化輸出大小；開始前會先檢查可用磁碟空間。
 
-Docker image 在建置時會從 llama.cpp 編譯 `llama-quantize` 並安裝轉換器依賴。預設固定在已確認支援 `Gemma4UnifiedForConditionalGeneration` 的 commit `e3546c7948e3af463d0b401e6421d5a4c2faf565`；也可用 build argument 指定其他 llama.cpp branch、tag 或 commit：
+Qwen3.5/3.6 VL 等多模態 output 會以純文字方式轉換：轉換器會略過視覺塔張量，產出的 Ollama 模型不支援影像輸入。若 `config.json` 宣告了多 token 預測層（`mtp_num_hidden_layers`），轉換會自動加上 `--no-mtp` — Heretic 經 Transformers 讀寫後會遺失 `mtp.*` 權重，若 GGUF 仍宣告該層將無法載入。
+
+Docker image 在建置時會從 llama.cpp 編譯 `llama-quantize` 並安裝轉換器依賴。預設固定在已確認支援 `Gemma4UnifiedForConditionalGeneration` 與 `Qwen3_5ForConditionalGeneration` 的 commit `e3546c7948e3af463d0b401e6421d5a4c2faf565`；也可用 build argument 指定其他 llama.cpp branch、tag 或 commit：
 
 ```bash
 docker compose build --build-arg LLAMA_CPP_REF=master webui
@@ -53,7 +55,9 @@ Gemma 4 需要 Transformers 5。映像不會直接安裝 llama.cpp 的通用 req
 
 `llama-quantize` 使用 CPU OpenMP 執行量化，因此 runtime image 也會安裝 `libgomp1`。若從未包含此套件的舊 image 更新，必須重新 build，單純 restart Container 不會安裝新的系統套件。
 
-匯入時可直接編輯 Modelfile。支援 `FROM .`、`PARAMETER`、`TEMPLATE`、`SYSTEM`、`LICENSE` 與 `MESSAGE`；後端會先驗證語法，再轉成 Ollama 新版 `/api/create` 的對應欄位。完整 output 的來源已由模型選單決定，因此 `FROM` 必須保持為 `.`，且不支援 `ADAPTER`。
+匯入時可直接編輯 Modelfile。支援 `FROM .`、`PARAMETER`、`TEMPLATE`、`SYSTEM`、`LICENSE`、`MESSAGE`、`RENDERER` 與 `PARSER`；後端會先驗證語法，再轉成 Ollama 新版 `/api/create` 的對應欄位。完整 output 的來源已由模型選單決定，因此 `FROM` 必須保持為 `.`，且不支援 `ADAPTER`。
+
+`RENDERER` 與 `PARSER` 用來指定 Ollama 內建的對話模板與回應解析器（例如 `RENDERER qwen3.5` 搭配 `PARSER qwen3.5`）。較新的架構在匯入 GGUF 時 Ollama 不會自動指派 renderer，若未使用這兩個指令（或自行撰寫 `TEMPLATE`），模型會退回預設的 `{{ .Prompt }}` 模板；使用原生 renderer 也能讓思考型模型的 `<think>` 內容被正確解析。
 
 建立任務時也可以在 WebUI 的「HF Hub Token」欄位填入 read token。若有填入，該任務會用此 Token 下載 private 或 gated 模型，並以 `0600` 權限保存到 `/data/hf_token`；因為 `/data` 對應主機的 `./data`，容器重啟或重建後仍可沿用。Token 不會出現在任務紀錄、TOML 或日誌中。再次輸入可取代已保存的 Token；留空時依序使用已保存的 Token、容器的 `HF_TOKEN`，否則匿名下載。
 
