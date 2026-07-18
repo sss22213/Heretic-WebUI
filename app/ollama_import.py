@@ -247,6 +247,11 @@ def parse_modelfile(content: str) -> dict:
                 parameters[name] = parsed
         elif directive in ("TEMPLATE", "SYSTEM", "LICENSE"):
             result[directive.lower()] = read_argument(argument, directive)
+        elif directive in ("RENDERER", "PARSER"):
+            value = argument.strip()
+            if not value:
+                raise ValueError(f"{directive} 必須指定名稱，例如 {directive} qwen3.5")
+            result[directive.lower()] = value
         elif directive == "MESSAGE":
             role_and_content = argument.split(maxsplit=1)
             if len(role_and_content) != 2 or role_and_content[0] not in ("system", "user", "assistant"):

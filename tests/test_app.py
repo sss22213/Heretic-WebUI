@@ -616,6 +616,15 @@ MESSAGE assistant Hi
     ]
 
 
+def test_parse_modelfile_supports_renderer_and_parser():
+    result = parse_modelfile("FROM .\nRENDERER qwen3.5\nPARSER qwen3.5")
+
+    assert result["renderer"] == "qwen3.5"
+    assert result["parser"] == "qwen3.5"
+    with pytest.raises(ValueError, match="RENDERER"):
+        parse_modelfile("FROM .\nRENDERER")
+
+
 def test_parse_modelfile_rejects_conflicting_source_and_adapter():
     with pytest.raises(ValueError, match="FROM"):
         parse_modelfile("FROM llama3.2")
