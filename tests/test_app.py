@@ -27,6 +27,7 @@ from app.ollama_import import (
     OllamaImport,
     OllamaImportManager,
     complete_safetensors_directory,
+    conversion_extra_args,
     gguf_artifact_paths,
     importable_files,
     llama_cpp_tools,
@@ -635,10 +636,44 @@ def test_gemma4_unified_is_rejected_before_upload_for_ollama_0306(tmp_path: Path
     assert ollama_compatibility_error("future-version", architectures) is None
 
 
-def test_auto_import_uses_gguf_for_gemma4_unified():
+def test_qwen35_safetensors_is_rejected_for_ollama_0312():
+    architectures = ["Qwen3_5ForConditionalGeneration"]
+
+    error = ollama_compatibility_error("0.31.2", architectures)
+    assert error is not None
+    assert "不支援" in error
+    assert ollama_compatibility_error("0.31.2", ["Qwen3ForCausalLM"]) is None
+    assert ollama_compatibility_error("future-version", architectures) is None
+
+
+def test_conversion_drops_declared_mtp_head(tmp_path: Path):
+    (tmp_path / "config.json").write_text(
+        json.dumps({"text_config": {"mtp_num_hidden_layers": 1}})
+    )
+    assert conversion_extra_args(tmp_path) == ["--no-mtp"]
+
+    (tmp_path / "config.json").write_text(json.dumps({"mtp_num_hidden_layers": 1}))
+    assert conversion_extra_args(tmp_path) == ["--no-mtp"]
+
+    (tmp_path / "config.json").write_text(
+        json.dumps({"text_config": {"mtp_num_hidden_layers": 0}})
+    )
+    assert conversion_extra_args(tmp_path) == []
+
+    (tmp_path / "config.json").write_text(json.dumps({"architectures": ["Qwen3ForCausalLM"]}))
+    assert conversion_extra_args(tmp_path) == []
+
+    (tmp_path / "config.json").unlink()
+    assert conversion_extra_args(tmp_path) == []
+
+
+def test_auto_import_uses_gguf_for_broken_safetensors_architectures():
     gemma4 = ["Gemma4UnifiedForConditionalGeneration"]
+    qwen35 = ["Qwen3_5ForConditionalGeneration"]
 
     assert resolve_import_format("auto", gemma4) == "gguf"
+    assert resolve_import_format("auto", qwen35) == "gguf"
+    assert resolve_import_format("auto", ["Qwen3_5MoeForConditionalGeneration"]) == "gguf"
     assert resolve_import_format("auto", ["Qwen3ForCausalLM"]) == "safetensors"
     assert resolve_import_format("safetensors", gemma4) == "safetensors"
     assert resolve_import_format("gguf", []) == "gguf"

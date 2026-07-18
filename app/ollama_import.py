@@ -22,7 +22,16 @@ from urllib.parse import quote, urlsplit
 
 LLAMA_CPP_DIR = Path(os.getenv("LLAMA_CPP_DIR", "/opt/llama.cpp"))
 GGUF_OUTPUT_DIR_NAME = ".gguf"
-GGUF_REQUIRED_ARCHITECTURES = {"Gemma4UnifiedForConditionalGeneration"}
+# Architectures whose safetensors import is broken in current Ollama releases;
+# route them through the local llama.cpp conversion instead. Qwen3.5/3.6 VL:
+# Ollama 0.31.2's converter emits block_count including the MTP layer without
+# the mtp.* tensors (missing tensor 'blk.64.attn_norm.weight') and a projector
+# blob its CLIP loader rejects, so the created model cannot load.
+GGUF_REQUIRED_ARCHITECTURES = {
+    "Gemma4UnifiedForConditionalGeneration",
+    "Qwen3_5ForConditionalGeneration",
+    "Qwen3_5MoeForConditionalGeneration",
+}
 QUANTIZED_SIZE_RATIOS = {
     "q2_K": 0.2,
     "q3_K_M": 0.28,
@@ -70,17 +79,21 @@ def model_architectures(directory: Path) -> list[str]:
 
 
 def ollama_compatibility_error(version: str, architectures: list[str]) -> str | None:
-    # Confirmed by Ollama's API response. Keep this version-specific so a future
-    # Ollama release can add support without being blocked by the WebUI.
+    # Confirmed against real Ollama responses. Keep this version-specific so a
+    # future Ollama release can add support without being blocked by the WebUI.
+    # 0.31.2 + Qwen3.5/3.6: /api/create succeeds but the produced GGUF cannot
+    # load (missing MTP tensor, broken projector blob).
+    qwen35 = {"Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration"}
     unsupported = {
         "0.30.6": {"Gemma4UnifiedForConditionalGeneration"},
+        "0.31.2": qwen35,
     }
     matched = unsupported.get(version, set()).intersection(architectures)
     if matched:
         architecture = sorted(matched)[0]
         return (
-            f"Ollama {version} 不支援 {architecture}，無法直接從 Safetensors 建立模型。"
-            "請更新至支援此架構的 Ollama，或先使用支援 Gemma 4 的 llama.cpp 工具轉成 GGUF。"
+            f"Ollama {version} 不支援 {architecture}，從 Safetensors 匯入會產生無法載入的模型。"
+            "請更新至支援此架構的 Ollama，或改用 GGUF 匯入格式（由 WebUI 內建的 llama.cpp 轉換）。"
         )
     return None
 
@@ -91,6 +104,23 @@ def resolve_import_format(requested: str, architectures: list[str]) -> str:
     if requested == "auto":
         return "gguf" if GGUF_REQUIRED_ARCHITECTURES.intersection(architectures) else "safetensors"
     return requested
+
+
+def conversion_extra_args(source: Path) -> list[str]:
+    try:
+        config = json.loads((source / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    text_config = config.get("text_config") or {}
+    mtp_layers = text_config.get("mtp_num_hidden_layers", config.get("mtp_num_hidden_layers", 0))
+    if isinstance(mtp_layers, int) and mtp_layers > 0:
+        # Heretic's transformers round-trip drops the mtp.* head tensors while
+        # config.json keeps advertising them; converting with MTP then yields a
+        # GGUF whose block_count/nextn metadata reference tensors that do not
+        # exist ("missing tensor 'blk.N.attn_norm.weight'"). Ollama cannot use
+        # the MTP head for speculative decoding anyway, so always exclude it.
+        return ["--no-mtp"]
+    return []
 
 
 def llama_cpp_tools(llama_cpp_dir: Path | None = None) -> tuple[Path, Path]:
@@ -613,6 +643,9 @@ class OllamaImportManager:
             self._log(item, f"轉換 Safetensors → BF16 GGUF：{bf16_path.name}")
             temporary = bf16_path.with_suffix(bf16_path.suffix + ".partial")
             temporary.unlink(missing_ok=True)
+            extra_args = conversion_extra_args(source)
+            if extra_args:
+                self._log(item, f"此架構需要額外轉換參數：{' '.join(extra_args)}")
             with self._conversion_source(item, source, final_path.parent) as conversion_source:
                 self._run_process(
                     item,
@@ -624,6 +657,7 @@ class OllamaImportManager:
                         str(temporary),
                         "--outtype",
                         "bf16",
+                        *extra_args,
                     ],
                 )
             if not temporary.is_file() or temporary.stat().st_size == 0:
