@@ -466,7 +466,10 @@ class OllamaImportManager:
                 timeout=5,
                 check=False,
             )
-            return result.returncode == 0
+            # llama-quantize has no --help flag: it prints usage and exits 1.
+            # Both 0 and 1 prove the binary executes; loader/arch failures
+            # surface as OSError or exit codes >= 126.
+            return result.returncode in (0, 1)
         except (OSError, subprocess.TimeoutExpired):
             return False
 

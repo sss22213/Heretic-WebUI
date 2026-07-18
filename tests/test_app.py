@@ -730,6 +730,8 @@ def test_gguf_health_check_executes_quantizer(tmp_path: Path, monkeypatch):
     manager = OllamaImportManager(tmp_path / "outputs", tmp_path / "data")
 
     assert manager.gguf_tools_available()
+    quantizer.write_text("#!/bin/sh\nexit 1\n")
+    assert manager.gguf_tools_available()
     quantizer.write_text("#!/bin/sh\nexit 127\n")
     assert not manager.gguf_tools_available()
 
