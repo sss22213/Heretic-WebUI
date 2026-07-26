@@ -2,7 +2,10 @@ const state = {
   jobs: [], selectedId: null, logOffset: 0, outputs: [], loras: [], poller: null,
   locale: localStorage.getItem('heretic-language') || 'zh-TW', pendingDelete: null, importLoaded: false,
   loraTaskSignature: null, hereticVersion: null,
+  evalRuns: [], evalPresets: [], evalPresetsOllama: [], evalSignature: null, ollamaModels: [],
 };
+const EVAL_NOTICE_DEFAULT = '評測與 Heretic 任務共用 GPU，同一時間只能執行一項。4-bit 量化模型的分數會與 BF16 略有差異，比較時請使用相同設定。';
+const EVAL_NOTICE_OLLAMA = 'GGUF 模式透過 Ollama 的 OpenAI 相容 API 評測，只支援生成式任務（如 gsm8k）；hellaswag、mmlu 等選擇題任務需要 logprobs，Ollama API 不提供，請改用 Safetensors 後端。';
 const $ = (selector) => document.querySelector(selector);
 let lastToastMessage = null;
 let lastToastAt = 0;
@@ -84,6 +87,7 @@ function showView(name) {
   if (name === 'jobs') refreshJobs();
   if (name === 'ollama') { refreshOutputs(); refreshOllamaImport(); }
   if (name === 'lora') { refreshOutputs().then(refreshLoras); refreshLoraTask(); }
+  if (name === 'evals') { refreshOutputs().then(refreshEvals); refreshEvalTask(); }
   if (name === 'versions') refreshHereticVersion(false);
 }
 
@@ -248,6 +252,115 @@ async function refreshLoraTask() {
     }
     state.loraTaskSignature = signature;
   } catch (error) { toast(`LoRA 狀態更新失敗：${error?.message || error}`); }
+}
+
+function formatMetric(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return String(value);
+  return number >= 0 && number <= 1 ? `${(number * 100).toFixed(2)}%` : number.toFixed(3);
+}
+
+function renderEvalForm() {
+  const ollama = $('#evalBackend').value === 'ollama';
+  $('#evalModelOptions').innerHTML = state.outputs.map((output) =>
+    `<option value="${escapeHtml(output.name)}"></option>`
+  ).join('');
+  const select = $('#evalModelSelect');
+  const previous = select.value;
+  select.innerHTML = state.ollamaModels.length
+    ? '<option value="">選擇 Ollama 模型</option>' + state.ollamaModels.map((name) =>
+        `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`
+      ).join('')
+    : '<option value="">尚無 Ollama 模型（請確認 API 位址）</option>';
+  if (state.ollamaModels.includes(previous)) select.value = previous;
+  const grid = $('#evalTaskGrid');
+  const presets = ollama ? state.evalPresetsOllama : state.evalPresets;
+  const checked = grid.dataset.backend === $('#evalBackend').value
+    ? new Set(Array.from(grid.querySelectorAll('input:checked')).map((input) => input.value))
+    : new Set(ollama ? ['gsm8k'] : ['hellaswag', 'arc_challenge']);
+  grid.innerHTML = presets.map((task) => `
+    <label class="check-item"><input type="checkbox" value="${escapeHtml(task)}" ${checked.has(task) ? 'checked' : ''}><code>${escapeHtml(task)}</code></label>`
+  ).join('');
+  if (presets.length) grid.dataset.backend = $('#evalBackend').value;
+}
+
+async function refreshOllamaModels() {
+  const base = $('#evalBaseUrl').value.trim();
+  try {
+    const data = await api(`/api/ollama/models${base ? `?base_url=${encodeURIComponent(base)}` : ''}`);
+    state.ollamaModels = data.models || [];
+    renderEvalForm();
+  } catch (error) { toast(`Ollama 模型清單取得失敗：${error?.message || error}`); }
+}
+
+function renderEvalRuns() {
+  $('#evalCount').textContent = state.evalRuns.length;
+  $('#evalRunCount').textContent = state.evalRuns.length;
+  const list = $('#evalRunList');
+  if (!state.evalRuns.length) { list.innerHTML = '<div class="empty-state">尚無評測紀錄</div>'; return; }
+  list.innerHTML = state.evalRuns.map((run) => {
+    const running = ['queued', 'running'].includes(run.status);
+    const options = [
+      run.num_fewshot === null ? 'few-shot 預設' : `few-shot ${run.num_fewshot}`,
+      run.limit ? `每任務 ${run.limit} 題` : '全部題目',
+      run.max_gen_toks ? `生成上限 ${run.max_gen_toks} tokens` : null,
+      run.backend === 'ollama' ? 'GGUF（Ollama）' : (run.quantization === 'bnb_4bit' ? '4-bit' : 'BF16'),
+    ].filter(Boolean).join(' · ');
+    const metrics = Object.entries(run.results || {}).map(([task, values]) => `
+      <div class="eval-metric-row"><strong>${escapeHtml(task)}</strong>${Object.entries(values).map(([metric, value]) =>
+        `<span>${escapeHtml(metric)} ${escapeHtml(formatMetric(value))}</span>`
+      ).join('')}</div>`).join('');
+    return `
+    <article class="eval-run-card">
+      <div class="eval-run-head"><span class="status-badge ${escapeHtml(run.status)}">${escapeHtml(statusLabel(run.status))}</span><strong title="${escapeHtml(run.model_source)}">${escapeHtml(run.model_source)}</strong></div>
+      ${running ? '<span></span>' : `<button class="model-delete" data-delete-eval="${escapeHtml(run.id)}" title="刪除評測紀錄" aria-label="刪除評測紀錄">×</button>`}
+      <div class="eval-run-meta">${formatTime(run.created_at)} · ${escapeHtml(run.tasks.join(', '))} · ${escapeHtml(options)}</div>
+      ${metrics ? `<div class="eval-metrics">${metrics}</div>` : ''}
+      ${run.error ? `<div class="eval-run-meta">${escapeHtml(run.error)}</div>` : ''}
+    </article>`;
+  }).join('');
+  list.querySelectorAll('[data-delete-eval]').forEach((button) => button.addEventListener('click', () => deleteEvalRun(button.dataset.deleteEval)));
+}
+
+async function refreshEvals() {
+  try {
+    const data = await api('/api/evals');
+    state.evalPresets = data.preset_tasks || [];
+    state.evalPresetsOllama = data.preset_tasks_ollama || [];
+    state.evalRuns = data.runs || [];
+    renderEvalForm();
+    renderEvalRuns();
+  } catch (error) { toast(`評測清單更新失敗：${error?.message || error}`); }
+}
+
+async function refreshEvalTask() {
+  try {
+    const task = await api('/api/evals/task');
+    if (!task) return;
+    $('#evalTaskPanel').hidden = false;
+    $('#evalTaskStatus').className = `status-badge ${task.status}`;
+    $('#evalTaskStatus').textContent = statusLabel(task.status);
+    $('#evalTaskTitle').textContent = `${task.model_source} · ${task.tasks.join(', ')}`;
+    const consoleElement = $('#evalConsole');
+    const nearBottom = consoleElement.scrollHeight - consoleElement.scrollTop - consoleElement.clientHeight < 80;
+    consoleElement.textContent = task.log || task.error || statusLabel(task.status);
+    if (nearBottom) consoleElement.scrollTop = consoleElement.scrollHeight;
+    const running = ['queued', 'running'].includes(task.status);
+    $('#evalCancelButton').hidden = !running;
+    if (!$('#evalSubmitButton').dataset.unavailable) $('#evalSubmitButton').disabled = running;
+    const signature = `${task.id}:${task.status}`;
+    if (state.evalSignature && state.evalSignature !== signature && !running) await refreshEvals();
+    state.evalSignature = signature;
+  } catch (error) { toast(`評測狀態更新失敗：${error?.message || error}`); }
+}
+
+async function deleteEvalRun(id) {
+  if (!window.confirm('確定刪除此評測紀錄？結果 JSON 也會一併刪除。')) return;
+  try {
+    await api(`/api/evals/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    await refreshEvals();
+    toast('已刪除評測紀錄。');
+  } catch (error) { toast(error?.message || error); }
 }
 
 function renderHereticVersion(version) {
@@ -493,6 +606,63 @@ $('#mergeLoraSelect').addEventListener('change', () => { $('#mergeOutputName').v
 $('#mergeBaseSelect').addEventListener('change', applyMergeSuggestion);
 $('#loraSelect').addEventListener('change', updateLoraImportHint);
 
+$('#refreshEvalsButton').addEventListener('click', () => {
+  refreshOutputs().then(refreshEvals);
+  if ($('#evalBackend').value === 'ollama') refreshOllamaModels();
+});
+$('#evalBackend').addEventListener('change', () => {
+  const ollama = $('#evalBackend').value === 'ollama';
+  $('#evalBaseUrlField').hidden = !ollama;
+  $('#evalBaseUrl').required = ollama;
+  $('#evalQuantField').hidden = ollama;
+  $('#evalModelSource').hidden = ollama;
+  $('#evalModelSource').required = !ollama;
+  $('#evalModelSelect').hidden = !ollama;
+  $('#evalModelSelect').required = ollama;
+  $('#evalModelHelp').textContent = ollama
+    ? '選擇 Ollama 內已有的模型；分數反映該量化版本的實際表現。'
+    : '支援 outputs 內的完整模型、/models 內的本機模型，或 Hugging Face model ID（會下載至快取）。';
+  if (!$('#evalSubmitButton').dataset.unavailable) {
+    $('#evalNotice').textContent = ollama ? EVAL_NOTICE_OLLAMA : EVAL_NOTICE_DEFAULT;
+  }
+  $('#evalModelSource').value = '';
+  if (ollama) refreshOllamaModels();
+  renderEvalForm();
+});
+$('#evalBaseUrl').addEventListener('change', () => { if ($('#evalBackend').value === 'ollama') refreshOllamaModels(); });
+$('#evalForm').addEventListener('submit', async (event) => {
+  event.preventDefault(); const button = $('#evalSubmitButton'); button.disabled = true;
+  const form = event.target;
+  const selected = Array.from($('#evalTaskGrid').querySelectorAll('input:checked')).map((input) => input.value);
+  const custom = form.elements.custom_tasks.value.trim();
+  const tasks = selected.concat(custom ? [custom] : []).join(',');
+  const backend = form.elements.backend.value;
+  const payload = {
+    model_source: backend === 'ollama' ? $('#evalModelSelect').value : form.elements.model_source.value.trim(),
+    tasks,
+    batch_size: Number(form.elements.batch_size.value || 0),
+    quantization: form.elements.quantization.value,
+    backend,
+    log_samples: form.elements.log_samples.checked,
+  };
+  if (form.elements.max_gen_toks.value !== '') payload.max_gen_toks = Number(form.elements.max_gen_toks.value);
+  if (backend === 'ollama') {
+    payload.base_url = form.elements.base_url.value.trim();
+    payload.quantization = 'none';
+  }
+  if (form.elements.num_fewshot.value !== '') payload.num_fewshot = Number(form.elements.num_fewshot.value);
+  if (form.elements.limit.value !== '') payload.limit = Number(form.elements.limit.value);
+  try {
+    await api('/api/evals', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    $('#evalTaskPanel').hidden = false; await refreshEvalTask(); await refreshEvals(); toast('評測已開始');
+  } catch (error) { toast(error.message); button.disabled = false; }
+});
+$('#evalCancelButton').addEventListener('click', async () => {
+  if (!window.confirm('確定取消目前的評測？')) return;
+  try { await api('/api/evals/cancel', { method: 'POST' }); await refreshEvalTask(); await refreshEvals(); toast('已取消評測'); }
+  catch (error) { toast(error?.message || error); }
+});
+
 async function initialize() {
   applyTranslations();
   try {
@@ -503,10 +673,15 @@ async function initialize() {
     $('#gpuInfo').textContent = system.gpu;
     $('#ollamaBaseUrl').value = system.ollama_base_url;
     $('#loraBaseUrl').value = system.ollama_base_url;
+    $('#evalBaseUrl').value = system.ollama_base_url;
     if (!system.gguf_tools_available) $('#ollamaNotice').textContent = t('toolsMissing');
+    if (system.lm_eval_available === false) {
+      $('#evalNotice').textContent = '目前映像缺少 lm-eval，請重新建置 WebUI image（docker compose up --build -d）後再執行評測。';
+      const button = $('#evalSubmitButton'); button.disabled = true; button.dataset.unavailable = '1';
+    }
     if (system.hf_token_saved) { $('#hfTokenHelp').textContent = t('tokenSaved'); $('#jobForm').elements.hf_token.placeholder = t('tokenSaved'); }
   } catch (_) { $('#healthText').textContent = t('serviceError'); }
-  await refreshJobs(); await refreshOutputs(); await refreshLoras(); await refreshOllamaImport(); await refreshLoraTask(); await refreshHereticVersion(false);
-  state.poller = window.setInterval(async () => { await refreshJobs(); await pollLog(); await refreshOllamaImport(); await refreshLoraTask(); }, 2000);
+  await refreshJobs(); await refreshOutputs(); await refreshLoras(); await refreshOllamaImport(); await refreshLoraTask(); await refreshEvals(); await refreshEvalTask(); await refreshHereticVersion(false);
+  state.poller = window.setInterval(async () => { await refreshJobs(); await pollLog(); await refreshOllamaImport(); await refreshLoraTask(); await refreshEvalTask(); }, 2000);
 }
 initialize();

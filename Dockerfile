@@ -36,11 +36,13 @@ WORKDIR /app
 COPY upstream-heretic /app/upstream-heretic
 COPY requirements-web.txt /app/requirements-web.txt
 COPY requirements-gguf.txt /app/requirements-gguf.txt
+COPY requirements-eval.txt /app/requirements-eval.txt
 COPY --from=llama-cpp-builder /opt/llama.cpp /opt/llama.cpp
 RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir -e /app/upstream-heretic \
     && python -m pip install --no-cache-dir -r /app/requirements-gguf.txt \
-    && python -m pip install --no-cache-dir -r /app/requirements-web.txt
+    && python -m pip install --no-cache-dir -r /app/requirements-web.txt \
+    && python -m pip install --no-cache-dir -r /app/requirements-eval.txt
 
 COPY app /app/app
 COPY patches /app/patches

@@ -14,6 +14,7 @@ A Docker-based web interface for [p-e-w/heretic](https://github.com/p-e-w/hereti
 - Import full models and LoRA-based models into Ollama over its HTTP API.
 - Convert unsupported Safetensors models to GGUF with llama.cpp.
 - Manage completed model outputs and generated GGUF artifacts.
+- Benchmark local or Hugging Face models with LM Evaluation Harness and compare scores across runs.
 - Manually update Heretic through validated A/B source slots with one-click rollback.
 - Use the interface in Traditional Chinese, Simplified Chinese, English, or Japanese.
 
@@ -181,6 +182,26 @@ Ollama's adapter converter only accepts a few architectures (Llama, Mistral, Gem
 
 Deleting a LoRA removes the local adapter under `/data/loras/<name>`. It does not delete Ollama models that were previously created from that adapter. LoRAs currently being downloaded or imported cannot be deleted.
 
+## Benchmarking with LM Evaluation Harness
+
+The **Benchmarks** page runs EleutherAI's [LM Evaluation Harness](https://github.com/EleutherAI/lm-evaluation-harness) with two backends:
+
+- **Local Safetensors (Transformers)**: loads a complete output from `./outputs`, a local model under `/models`, or a Hugging Face model ID (downloaded to the shared cache) onto the GPU. Supports all lm-eval tasks, including loglikelihood/multiple-choice ones.
+- **Ollama model (GGUF, via API)**: benchmarks a model already deployed in Ollama through its OpenAI-compatible chat API (`local-chat-completions`), so scores reflect the actual quantized GGUF you serve. The page lists available Ollama models and verifies the model exists before starting. Because the API does not expose logprobs, only generative tasks work in this mode (for example `gsm8k`, `gsm8k_cot`, `drop`, `triviaqa`, `nq_open`); multiple-choice tasks such as `hellaswag` or `mmlu` require the Safetensors backend. Completion-style task stop strings (such as gsm8k's `Question:`) are automatically neutralized in this mode: Ollama applies them to the raw token stream, where they match inside the thinking content of reasoning models and would cut generation off before any answer.
+
+Common tasks (`hellaswag`, `arc_easy`, `arc_challenge`, `winogrande`, `piqa`, `mmlu`, `gsm8k`, `truthfulqa_mc2`) are offered as checkboxes, and any other lm-eval task name can be entered manually. Available options:
+
+- **Load quantization**: `bitsandbytes 4-bit` (default) fits large models into limited VRAM; `BF16` needs roughly 2 bytes per parameter. Scores differ slightly between the two, so use identical settings when comparing models.
+- **Few-shot count**: leave empty to use each task's default.
+- **Per-task limit**: caps the number of questions per task for quick comparisons; leave empty for official scores.
+- **Batch size**: `0` selects lm-eval's automatic batch sizing.
+- **Max generation tokens**: overrides each task's default generation budget (`--gen_kwargs max_gen_toks`). Required for thinking/reasoning models — the task defaults (often 256 tokens) get consumed entirely by reasoning content, leaving an empty answer and a score of 0. Use 2048 or more.
+- **Save per-sample outputs**: passes `--log_samples` so every model response is written next to the results JSON for inspection.
+
+Benchmarks share the GPU with Heretic jobs, so only one of the two can run at a time. Evaluation datasets are downloaded from Hugging Face and cached under `/data/huggingface`.
+
+Each run streams its log to the page and stores the full lm-eval results JSON under `data/evals/<run-id>/results/`. The run history shows the primary metric of every task (stderr values and aliases are omitted) and can be deleted per run. Runs interrupted by a service restart are marked as failed.
+
 ## Manual Heretic Updates with A/B Slots
 
 Heretic updates are never scheduled or installed automatically. The system only checks or updates when a user explicitly presses the corresponding button and confirms the action.
@@ -227,7 +248,7 @@ An update is considered successful only after this patch has been applied or det
 
 | Host path | Container path | Purpose |
 |---|---|---|
-| `./data` | `/data` | Hugging Face cache, downloaded LoRAs, checkpoints, jobs, and logs |
+| `./data` | `/data` | Hugging Face cache, downloaded LoRAs, checkpoints, jobs, logs, and benchmark results |
 | `./data/heretic_slots` | `/data/heretic_slots` | Validated Heretic A/B source slots |
 | `./data/heretic_upstream` | `/data/heretic_upstream` | Runtime clone of the official Heretic Git repository |
 | `./outputs` | `/outputs` | Completed Heretic models and output adapters |

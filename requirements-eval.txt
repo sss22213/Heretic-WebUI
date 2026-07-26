@@ -1,0 +1,6 @@
+# LM Evaluation Harness for the benchmark page. Installed after Heretic so the
+# CUDA PyTorch / Transformers stack already present in the image is reused
+# instead of being replaced by lm-eval's broad dependency ranges.
+# The [api] extra provides the client used to benchmark GGUF models through
+# Ollama's OpenAI-compatible API (local-chat-completions backend).
+lm_eval[api]>=0.4.8,<0.6

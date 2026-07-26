@@ -127,6 +127,21 @@ details[open] .chevron { transform: rotate(180deg); }
 .model-copy strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
 .model-copy small { display: block; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-tertiary); font: 10px/1.4 ui-monospace, monospace; }
 .merge-hint { color: #c47f17; font-weight: 600; }
+.eval-task-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.check-item { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 8px 10px; color: var(--ink-muted); background: var(--surface-2); border: 1px solid var(--hairline-strong); border-radius: 8px; font-weight: 400; cursor: pointer; transition: border-color .15s; }
+.check-item:hover { border-color: var(--hairline-tertiary); }
+.check-item input { width: 16px; height: 16px; min-height: 0; flex: 0 0 auto; padding: 0; margin: 0; accent-color: var(--primary); }
+.check-item code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px/1.4 ui-monospace, "SFMono-Regular", Consolas, monospace; }
+#evalConsole { height: 280px; margin: 0; padding: 18px; color: var(--ink-muted); background: var(--canvas); overflow: auto; white-space: pre-wrap; word-break: break-word; font: 12px/1.6 ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.eval-run-list { display: grid; gap: 10px; }
+.eval-run-card { min-width: 0; padding: 15px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 12px; background: var(--canvas); border: 1px solid var(--hairline); border-radius: 10px; }
+.eval-run-head { min-width: 0; display: flex; align-items: center; gap: 10px; }
+.eval-run-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
+.eval-run-meta { grid-column: 1 / -1; color: var(--ink-tertiary); font: 11px/1.5 ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.eval-metrics { grid-column: 1 / -1; display: grid; gap: 4px; }
+.eval-metric-row { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 6px 10px; background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 8px; font: 11px/1.5 ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.eval-metric-row strong { color: var(--ink-muted); font-weight: 600; }
+.eval-metric-row span { color: var(--ink-subtle); }
 .model-delete { width: 34px; height: 34px; padding: 0; color: var(--ink-tertiary); background: transparent; border: 1px solid transparent; border-radius: 8px; }
 .model-delete:hover { color: var(--ink); background: var(--surface-3); border-color: var(--hairline-strong); }
 .import-panel { margin-top: 18px; overflow: hidden; background: var(--canvas); border: 1px solid var(--hairline); border-radius: 16px; }

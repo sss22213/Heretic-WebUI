@@ -71,6 +71,26 @@ Ollama 的 adapter 轉換器只支援少數架構（Llama、Mistral、Gemma 系�
 
 刪除 LoRA 只會移除 `/data/loras/<name>` 的本機 adapter，不會自動刪除已建立的 Ollama 模型。正在下載或匯入的 LoRA 會拒絕刪除。
 
+## 跑分評測（LM Evaluation Harness）
+
+「跑分評測」頁面以 EleutherAI 的 [LM Evaluation Harness](https://github.com/EleutherAI/lm-evaluation-harness) 對模型執行標準評測，提供兩種後端：
+
+- **本機 Safetensors（Transformers）**：把 `./outputs` 內權重完整的 output、`/models` 內的本機模型，或 Hugging Face model ID（會下載至共用快取）載入 GPU 評測。支援所有 lm-eval 任務，包含選擇題（loglikelihood）類型。
+- **Ollama 模型（GGUF，經 API）**：透過 Ollama 的 OpenAI 相容 API（`local-chat-completions`）直接評測已部署的模型，分數反映實際使用的量化 GGUF 版本。頁面會列出 Ollama 內可用的模型，開始前也會先確認模型存在。由於該 API 不提供 logprobs，此模式只支援生成式任務（例如 `gsm8k`、`gsm8k_cot`、`drop`、`triviaqa`、`nq_open`）；`hellaswag`、`mmlu` 等選擇題任務請改用 Safetensors 後端。此模式會自動中和任務定義的 completion 式停止字串（如 gsm8k 的 `Question:`）— Ollama 會把停止字串套用在原始 token 流上，推理模型的思考內容會誤觸而在給出答案前被切斷。
+
+常用任務（`hellaswag`、`arc_easy`、`arc_challenge`、`winogrande`、`piqa`、`mmlu`、`gsm8k`、`truthfulqa_mc2`）可直接勾選，也可手動輸入任何 lm-eval 任務名稱。可調選項：
+
+- **載入量化**：預設 `bitsandbytes 4-bit`，可讓大型模型放進有限 VRAM；`BF16` 約需 2×參數量的 VRAM。兩者分數會略有差異，比較模型時請使用相同設定。
+- **Few-shot 數**：留空使用各任務預設值。
+- **題數上限（每任務）**：快速比較時可限制題數；正式分數請留空跑完整資料集。
+- **Batch size**：`0` 代表由 lm-eval 自動偵測。
+- **最大生成 tokens**：覆寫各任務的預設生成額度（`--gen_kwargs max_gen_toks`）。推理（thinking）模型必填 — 任務預設額度（多為 256 tokens）會被思考內容整個佔滿，最終答案為空而得 0 分，建議設 2048 以上。
+- **保存每題輸出**：加上 `--log_samples`，把每題的模型回應寫入 results 目錄旁，方便逐題檢查。
+
+評測與 Heretic 任務共用 GPU，同一時間只能執行其中一項。評測資料集會從 Hugging Face 下載並快取於 `/data/huggingface`。
+
+每次評測會即時串流日誌，完整的 lm-eval 結果 JSON 保存在 `data/evals/<run-id>/results/`。評測紀錄清單顯示各任務的主要指標（省略 stderr 與 alias），並可逐筆刪除；服務重啟時中斷的評測會標記為失敗。
+
 ## Heretic 版本管理
 
 「Heretic 版本」頁面會顯示 Active Slot 與 commit，並可手動檢查官方 `origin/master`、更新至最新版，以及用「退回上一個版本」按鈕切回更新前的 Slot。每次成功更新只保留一個 rollback point。
@@ -99,7 +119,7 @@ docker compose down
 
 | 主機路徑 | 容器路徑 | 用途 |
 |---|---|---|
-| `./data` | `/data` | Hugging Face cache、下載的 LoRA、checkpoint、任務與日誌 |
+| `./data` | `/data` | Hugging Face cache、下載的 LoRA、checkpoint、任務、日誌與評測結果 |
 | `./data/heretic_slots` | `/data/heretic_slots` | Heretic A/B source slots |
 | `./data/heretic_upstream` | `/data/heretic_upstream` | 執行時從官方來源建立的 Git cache |
 | `./outputs` | `/outputs` | Heretic 完成的模型或輸出 adapter |

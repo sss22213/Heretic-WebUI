@@ -34,6 +34,7 @@
           <button class="nav-item" data-view="versions"><span class="nav-icon">↻</span><span>Heretic 版本</span></button>
           <button class="nav-item" data-view="lora"><span class="nav-icon">⧉</span><span>LoRA 管理</span><span class="count" id="loraCount">0</span></button>
           <button class="nav-item" data-view="ollama"><span class="nav-icon">◇</span><span data-i18n="navOllama">模型與 Ollama</span></button>
+          <button class="nav-item" data-view="evals"><span class="nav-icon">◎</span><span>跑分評測</span><span class="count" id="evalCount">0</span></button>
         </nav>
       </div>
       <div class="hardware">
@@ -223,6 +224,40 @@
         </section>
       </div>
 
+      <div id="evalsView" class="view">
+        <div class="page-heading"><div><p class="eyebrow">BENCHMARK</p><h1>跑分評測</h1><p class="page-subtitle">以 LM Evaluation Harness 對本機 output、/models 模型或 Hugging Face 模型執行標準評測。</p></div><button class="secondary" id="refreshEvalsButton">重新整理</button></div>
+
+        <form id="evalForm">
+          <section class="form-section">
+            <div class="section-heading"><span class="section-index">01</span><div><h2>評測設定</h2><p>模型以 Transformers 載入 GPU 執行；評測資料集會從 Hugging Face 下載並快取。</p></div></div>
+            <div class="fields two-col">
+              <label class="field span-2"><span>評測後端</span><select name="backend" id="evalBackend"><option value="hf">本機 Safetensors（Transformers）</option><option value="ollama">Ollama 模型（GGUF，經 API）</option></select><small id="evalBackendHelp">GGUF 模式直接評測 Ollama 中已部署的量化模型，分數反映實際使用情況。</small></label>
+              <label class="field span-2" id="evalBaseUrlField" hidden><span>Ollama API 位址</span><input type="url" name="base_url" id="evalBaseUrl" placeholder="http://ollama:11434"><small>兩個 Container 必須能透過此位址互相連線。</small></label>
+              <label class="field span-2"><span>模型來源</span><input name="model_source" id="evalModelSource" list="evalModelOptions" required pattern="[a-zA-Z0-9/][a-zA-Z0-9._/:-]*" placeholder="選擇 output、/models 路徑或 HF model ID"><select id="evalModelSelect" hidden><option value="">尚無 Ollama 模型</option></select><datalist id="evalModelOptions"></datalist><small id="evalModelHelp">支援 outputs 內的完整模型、/models 內的本機模型，或 Hugging Face model ID（會下載至快取）。</small></label>
+              <div class="field span-2"><span>評測任務</span><div class="eval-task-grid" id="evalTaskGrid"></div><small>常用任務可直接勾選；分數以 lm-eval 回報的主要指標為準。</small></div>
+              <label class="field span-2"><span>自訂任務（選填）</span><input name="custom_tasks" id="evalCustomTasks" pattern="[a-zA-Z0-9._,\s-]*" placeholder="mmlu_pro, bbh（逗號分隔）"><small>可輸入任何 lm-eval 任務名稱，與上方勾選合併執行。</small></label>
+              <label class="field" id="evalQuantField"><span>載入量化</span><select name="quantization"><option value="bnb_4bit">bitsandbytes 4-bit</option><option value="none">不量化（BF16）</option></select><small>BF16 約需 2×參數量的 VRAM；4-bit 約 0.6×。</small></label>
+              <label class="field"><span>Few-shot 數</span><input type="number" name="num_fewshot" min="0" max="64" placeholder="任務預設"><small>留空使用各任務的預設 shot 數。</small></label>
+              <label class="field"><span>題數上限（每任務）</span><input type="number" name="limit" min="1" placeholder="全部"><small>快速比較可先用 100–200 題；正式分數請留空。</small></label>
+              <label class="field"><span>Batch size</span><input type="number" name="batch_size" min="0" max="512" value="0"><small>0 代表自動偵測。</small></label>
+              <label class="field"><span>最大生成 tokens</span><input type="number" name="max_gen_toks" id="evalMaxGenToks" min="16" max="32768" placeholder="任務預設"><small>推理（thinking）模型必填，建議 2048 以上；預設額度（多為 256）會被思考內容佔滿而得 0 分。</small></label>
+              <label class="toggle-field"><input type="checkbox" name="log_samples"><span class="toggle"></span><span><strong>保存每題輸出</strong><small>寫入 results 目錄，方便檢查模型實際回答。</small></span></label>
+            </div>
+            <div class="notice" id="evalNotice">評測與 Heretic 任務共用 GPU，同一時間只能執行一項。4-bit 量化模型的分數會與 BF16 略有差異，比較時請使用相同設定。</div>
+          </section>
+          <div class="form-actions"><p>評測在背景執行，離開頁面不會中止。</p><button class="primary" id="evalSubmitButton" type="submit">開始評測</button></div>
+        </form>
+
+        <section class="import-panel" id="evalTaskPanel" hidden>
+          <div class="console-header"><div><span class="status-badge idle" id="evalTaskStatus">未執行</span><strong id="evalTaskTitle">評測日誌</strong></div><div class="console-actions"><button class="danger" id="evalCancelButton" hidden>取消</button></div></div>
+          <pre id="evalConsole">尚無評測。</pre>
+        </section>
+
+        <section class="library-section">
+          <div class="library-heading"><div><h2>評測紀錄</h2><p>完整結果 JSON 保存在 data/evals；此處顯示各任務主要指標。</p></div><span class="count large" id="evalRunCount">0</span></div>
+          <div class="eval-run-list" id="evalRunList"><div class="empty-state">尚無評測紀錄</div></div>
+        </section>
+      </div>
     </section>
   </main>
   <div class="modal-backdrop" id="deleteModal" hidden>

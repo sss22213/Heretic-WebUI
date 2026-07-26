@@ -311,9 +311,15 @@ class OllamaClient:
         return f"{self.prefix}{path}" or "/"
 
     def version(self) -> dict:
+        return self._get_json("/api/version")
+
+    def tags(self) -> dict:
+        return self._get_json("/api/tags")
+
+    def _get_json(self, path: str) -> dict:
         connection = self._connection()
         try:
-            connection.request("GET", self._path("/api/version"))
+            connection.request("GET", self._path(path))
             response = connection.getresponse()
             body = response.read()
             if response.status != 200:

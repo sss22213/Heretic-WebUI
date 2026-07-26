@@ -21,9 +21,16 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
+from .eval_manager import (
+    PRESET_TASKS,
+    PRESET_TASKS_OLLAMA,
+    EvalManager,
+    lm_eval_available,
+    parse_task_list,
+)
 from .heretic_version import HereticVersionManager
 from .lora_manager import LoRAManager, adapter_supported_by_ollama, suggest_merge_base
-from .ollama_import import OllamaImportManager
+from .ollama_import import OllamaClient, OllamaImportManager
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = ROOT / "app" / "static"
@@ -179,6 +186,21 @@ class LoRAImportRequest(BaseModel):
         if not value.startswith(("http://", "https://")):
             raise ValueError("Ollama API 位址必須以 http:// 或 https:// 開頭")
         return value
+
+
+class EvalRequest(BaseModel):
+    model_source: str = Field(
+        min_length=1, max_length=500, pattern=r"^[a-zA-Z0-9/][a-zA-Z0-9._/:-]*$"
+    )
+    tasks: str = Field(min_length=1, max_length=2000)
+    num_fewshot: int | None = Field(default=None, ge=0, le=64)
+    limit: int | None = Field(default=None, ge=1, le=100000)
+    batch_size: int = Field(default=0, ge=0, le=512)
+    quantization: Literal["none", "bnb_4bit"] = "none"
+    backend: Literal["hf", "ollama"] = "hf"
+    base_url: str | None = Field(default=None, max_length=500)
+    max_gen_toks: int | None = Field(default=None, ge=16, le=32768)
+    log_samples: bool = False
 
 
 class UISettingsRequest(BaseModel):
@@ -593,6 +615,7 @@ class JobManager:
 manager = JobManager()
 ollama_manager = OllamaImportManager(OUTPUT_DIR, DATA_DIR)
 lora_manager = LoRAManager(DATA_DIR)
+eval_manager = EvalManager(DATA_DIR, OUTPUT_DIR, MODELS_DIR)
 heretic_version_manager = HereticVersionManager(
     HERETIC_SOURCE_DIR,
     HERETIC_VERSION_FILE,
@@ -647,6 +670,7 @@ def system_info():
         "hf_token_saved": hf_token_store.get() is not None,
         "ollama_base_url": OLLAMA_BASE_URL,
         "gguf_tools_available": ollama_manager.gguf_tools_available(),
+        "lm_eval_available": lm_eval_available(),
     }
 
 
@@ -821,6 +845,76 @@ def delete_lora(lora_name: str):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@app.get("/api/evals")
+def list_evals():
+    return {
+        "preset_tasks": PRESET_TASKS,
+        "preset_tasks_ollama": PRESET_TASKS_OLLAMA,
+        "runs": eval_manager.list(),
+    }
+
+
+@app.post("/api/evals", status_code=202)
+def create_eval(request: EvalRequest):
+    if any(job.status in ("queued", "running") for job in manager.list()):
+        raise HTTPException(status_code=409, detail="Heretic 任務執行中，GPU 使用中，請稍後再試")
+    try:
+        tasks = parse_task_list(request.tasks)
+        return asdict(
+            eval_manager.start(
+                request.model_source, tasks, request.num_fewshot, request.limit,
+                request.batch_size, request.quantization, hf_token_store.get(),
+                backend=request.backend, base_url=request.base_url,
+                max_gen_toks=request.max_gen_toks, log_samples=request.log_samples,
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/ollama/models")
+def list_ollama_models(base_url: str | None = Query(default=None, max_length=500)):
+    url = (base_url or OLLAMA_BASE_URL).strip().rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="Ollama API 位址必須以 http:// 或 https:// 開頭")
+    try:
+        items = OllamaClient(url).tags().get("models", [])
+        names = sorted({
+            str(item.get("name") or item.get("model"))
+            for item in items
+            if isinstance(item, dict) and (item.get("name") or item.get("model"))
+        })
+        return {"models": names}
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise HTTPException(status_code=502, detail=f"無法取得 Ollama 模型清單：{exc}") from exc
+
+
+@app.get("/api/evals/task")
+def get_eval_task():
+    return eval_manager.get_task()
+
+
+@app.post("/api/evals/cancel")
+async def cancel_eval():
+    try:
+        run = await asyncio.to_thread(eval_manager.cancel)
+        return asdict(run)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.delete("/api/evals/{run_id}")
+def delete_eval(run_id: str):
+    try:
+        return eval_manager.delete(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.get("/api/jobs")
 def list_jobs():
     return [asdict(job) for job in manager.list()]
@@ -828,6 +922,8 @@ def list_jobs():
 
 @app.post("/api/jobs", status_code=202)
 def create_job(request: JobRequest):
+    if eval_manager.active() is not None:
+        raise HTTPException(status_code=409, detail="評測執行中，GPU 使用中，請稍後再試")
     try:
         return asdict(manager.create(request))
     except RuntimeError as exc:
@@ -864,6 +960,8 @@ async def cancel_job(job_id: str):
 
 @app.post("/api/jobs/{job_id}/retry", status_code=202)
 def retry_job(job_id: str):
+    if eval_manager.active() is not None:
+        raise HTTPException(status_code=409, detail="評測執行中，GPU 使用中，請稍後再試")
     try:
         return asdict(manager.retry(job_id))
     except KeyError as exc:

@@ -47,6 +47,12 @@ from app.lora_manager import (
     suggest_merge_base,
 )
 from app.lora_merge import auxiliary_files, model_class_name
+from app.eval_manager import (
+    EvalManager,
+    EvalRun,
+    parse_task_list,
+    summarize_results,
+)
 from app.heretic_version import HereticVersionManager
 
 
@@ -1042,3 +1048,231 @@ def test_lora_merge_accepts_models_dir_path_as_base(tmp_path: Path, monkeypatch)
 
     assert manager.current.status == "completed", manager.current.error
     assert (outputs / "merged-out" / "model.safetensors").read_bytes() == b"merged"
+
+
+def test_parse_task_list_validates_and_dedupes():
+    assert parse_task_list("hellaswag, arc_challenge hellaswag") == ["hellaswag", "arc_challenge"]
+    with pytest.raises(ValueError, match="無效的評測任務名稱"):
+        parse_task_list("hellaswag;rm")
+    with pytest.raises(ValueError, match="無效的評測任務名稱"):
+        parse_task_list("-flag")
+    with pytest.raises(ValueError, match="至少"):
+        parse_task_list("  ,  ")
+
+
+def test_summarize_results_keeps_primary_metrics():
+    raw = {
+        "results": {
+            "gsm8k": {
+                "alias": "gsm8k",
+                "sample_len,none": 30,
+                "exact_match,strict-match": 0.55123,
+                "exact_match_stderr,strict-match": 0.013,
+                "exact_match,flexible-extract": 0.6,
+                "exact_match_stderr,flexible-extract": 0.012,
+            },
+            "hellaswag": {"acc,none": 0.5, "acc_norm,none": 0.66666, "acc_stderr,none": 0.01},
+            "broken": "not-a-dict",
+        }
+    }
+    summary = summarize_results(raw)
+    assert summary["gsm8k"] == {
+        "exact_match(strict-match)": 0.5512,
+        "exact_match(flexible-extract)": 0.6,
+    }
+    assert summary["hellaswag"] == {"acc": 0.5, "acc_norm": 0.6667}
+    assert "broken" not in summary
+    assert summarize_results({}) == {}
+
+
+def test_eval_resolve_model_sources(tmp_path: Path):
+    data = tmp_path / "data"
+    outputs = tmp_path / "outputs"
+    models = tmp_path / "models"
+    outputs.mkdir()
+    complete = outputs / "my-output"
+    complete.mkdir()
+    (complete / "model.safetensors").write_bytes(b"w")
+    (outputs / "incomplete").mkdir()
+    local = models / "local-base"
+    local.mkdir(parents=True)
+    (local / "model.safetensors").write_bytes(b"w")
+
+    manager = EvalManager(data, outputs, models)
+    assert manager.resolve_model("my-output") == str(complete.resolve())
+    assert manager.resolve_model(str(local)) == str(local.resolve())
+    assert manager.resolve_model("org/model") == "org/model"
+    with pytest.raises(ValueError, match="完整的 output"):
+        manager.resolve_model("incomplete")
+    with pytest.raises(ValueError, match="完整的 output"):
+        manager.resolve_model("missing")
+    with pytest.raises(ValueError, match="必須位於"):
+        manager.resolve_model(str(outputs / "my-output"))
+    with pytest.raises(ValueError, match="organization/model"):
+        manager.resolve_model("org//model")
+    no_models = EvalManager(tmp_path / "data2", outputs, None)
+    with pytest.raises(ValueError, match="不支援路徑"):
+        no_models.resolve_model(str(local))
+
+
+def test_eval_command_reflects_options(tmp_path: Path):
+    manager = EvalManager(tmp_path / "data", tmp_path / "outputs")
+    run = EvalRun(
+        id="abc", status="queued", created_at="now", model_source="my-output",
+        model_path="/outputs/my-output", tasks=["hellaswag", "gsm8k"],
+        num_fewshot=5, limit=200, batch_size=8, quantization="bnb_4bit",
+    )
+    command = manager.command(run)
+    assert command[command.index("--model_args") + 1] == (
+        "pretrained=/outputs/my-output,dtype=bfloat16,load_in_4bit=True"
+    )
+    assert command[command.index("--tasks") + 1] == "hellaswag,gsm8k"
+    assert command[command.index("--batch_size") + 1] == "8"
+    assert command[command.index("--num_fewshot") + 1] == "5"
+    assert command[command.index("--limit") + 1] == "200"
+
+    auto = EvalRun(
+        id="def", status="queued", created_at="now", model_source="m",
+        model_path="org/model", tasks=["mmlu"],
+    )
+    command = manager.command(auto)
+    assert command[command.index("--batch_size") + 1] == "auto"
+    assert "--num_fewshot" not in command
+    assert "--limit" not in command
+    assert "--gen_kwargs" not in command
+    assert "--log_samples" not in command
+    assert "load_in_4bit" not in command[command.index("--model_args") + 1]
+
+    thinking = EvalRun(
+        id="ghi", status="queued", created_at="now", model_source="m:Q4",
+        model_path="m:Q4", tasks=["gsm8k"], backend="ollama",
+        base_url="http://ollama:11434", max_gen_toks=2048, log_samples=True,
+    )
+    command = manager.command(thinking)
+    assert command[command.index("--gen_kwargs") + 1] == "max_gen_toks=2048,until=<|endoftext|>"
+    assert "--log_samples" in command
+
+    # Ollama runs neutralize task stop strings even without a token override;
+    # Ollama applies them to the raw stream where they match thinking content.
+    plain_ollama = EvalRun(
+        id="jkl", status="queued", created_at="now", model_source="m:Q4",
+        model_path="m:Q4", tasks=["gsm8k"], backend="ollama",
+        base_url="http://ollama:11434",
+    )
+    command = manager.command(plain_ollama)
+    assert command[command.index("--gen_kwargs") + 1] == "until=<|endoftext|>"
+
+
+def test_eval_run_executes_and_parses_results(tmp_path: Path, monkeypatch):
+    data = tmp_path / "data"
+    outputs = tmp_path / "outputs"
+    model = outputs / "my-output"
+    model.mkdir(parents=True)
+    (model / "model.safetensors").write_bytes(b"w")
+    manager = EvalManager(data, outputs)
+    monkeypatch.setattr("app.eval_manager.lm_eval_available", lambda: True)
+
+    class FakeProcess:
+        def __init__(self, command, **_kwargs):
+            results_dir = Path(command[command.index("--output_path") + 1]) / "my-output"
+            results_dir.mkdir(parents=True)
+            (results_dir / "results_2026-07-26.json").write_text(json.dumps({
+                "results": {"hellaswag": {"acc,none": 0.42, "acc_stderr,none": 0.01}}
+            }))
+            self.stdout = iter(["Running loglikelihood requests\n"])
+            self.pid = 4242
+            self.returncode = 0
+
+        def wait(self):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr("app.eval_manager.subprocess.Popen", FakeProcess)
+    run = manager.start("my-output", ["hellaswag"], None, None, 0, "none")
+    with pytest.raises(RuntimeError, match="已有評測正在執行"):
+        manager.start("my-output", ["hellaswag"], None, None, 0, "none")
+    for _ in range(100):
+        if manager.runs[run.id].status in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+
+    stored = manager.runs[run.id]
+    assert stored.status == "completed", stored.error
+    assert stored.results == {"hellaswag": {"acc": 0.42}}
+    log = (data / "evals" / run.id / "run.log").read_text(encoding="utf-8")
+    assert "Running loglikelihood requests" in log
+    assert "評測完成" in log
+
+    task = manager.get_task()
+    assert task["id"] == run.id and "log" in task
+    with pytest.raises(RuntimeError, match="沒有執行中的評測"):
+        manager.cancel()
+    assert manager.delete(run.id) == {"id": run.id}
+    assert not (data / "evals" / run.id).exists()
+    with pytest.raises(ValueError, match="找不到評測紀錄"):
+        manager.delete(run.id)
+
+
+def test_eval_manager_marks_interrupted_runs_failed_on_load(tmp_path: Path):
+    data = tmp_path / "data"
+    manager = EvalManager(data, tmp_path / "outputs")
+    run = EvalRun(
+        id="stale1", status="running", created_at="2026-07-26T00:00:00+00:00",
+        model_source="m", model_path="/outputs/m", tasks=["hellaswag"],
+    )
+    manager.runs[run.id] = run
+    manager._persist(run)
+
+    reloaded = EvalManager(data, tmp_path / "outputs")
+    stale = reloaded.runs["stale1"]
+    assert stale.status == "failed"
+    assert "重啟" in stale.error
+
+
+def test_eval_ollama_backend_command_and_validation(tmp_path: Path):
+    manager = EvalManager(tmp_path / "data", tmp_path / "outputs")
+    assert manager.validate_ollama_model("my-model:Q4") == "my-model:Q4"
+    assert manager.validate_ollama_model("user/model:latest") == "user/model:latest"
+    with pytest.raises(ValueError, match="Ollama 模型名稱"):
+        manager.validate_ollama_model("bad name")
+    with pytest.raises(ValueError, match="Ollama 模型名稱"):
+        manager.validate_ollama_model(":latest")
+    assert manager.validate_base_url("http://ollama:11434/") == "http://ollama:11434"
+    with pytest.raises(ValueError, match="Ollama API 位址"):
+        manager.validate_base_url("ollama:11434")
+    with pytest.raises(ValueError, match="Ollama API 位址"):
+        manager.validate_base_url("http://a,b")
+    with pytest.raises(ValueError, match="需要 Ollama API 位址"):
+        manager.validate_base_url(None)
+
+    run = EvalRun(
+        id="abc", status="queued", created_at="now",
+        model_source="thinkingcap-q4:latest", model_path="thinkingcap-q4:latest",
+        tasks=["gsm8k"], num_fewshot=5, limit=100,
+        backend="ollama", base_url="http://ollama:11434",
+    )
+    command = manager.command(run)
+    assert command[command.index("--model") + 1] == "local-chat-completions"
+    assert command[command.index("--model_args") + 1] == (
+        "model=thinkingcap-q4:latest,"
+        "base_url=http://ollama:11434/v1/chat/completions,"
+        "num_concurrent=1,max_retries=3"
+    )
+    assert "--apply_chat_template" in command
+    assert "--batch_size" not in command
+    assert command[command.index("--num_fewshot") + 1] == "5"
+    assert command[command.index("--limit") + 1] == "100"
+
+
+def test_eval_start_ollama_requires_base_url(tmp_path: Path, monkeypatch):
+    manager = EvalManager(tmp_path / "data", tmp_path / "outputs")
+    monkeypatch.setattr("app.eval_manager.lm_eval_available", lambda: True)
+    with pytest.raises(ValueError, match="需要 Ollama API 位址"):
+        manager.start("model:Q4", ["gsm8k"], None, None, 0, "none", backend="ollama")
+    with pytest.raises(ValueError, match="Ollama 模型名稱"):
+        manager.start(
+            "bad//name::", ["gsm8k"], None, None, 0, "none",
+            backend="ollama", base_url="http://ollama:11434",
+        )
