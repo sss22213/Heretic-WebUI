@@ -175,6 +175,10 @@ When `adapter_config.json` contains `base_model_name_or_path`, the UI uses it as
 
 The adapter is uploaded through Ollama's blob API and a derived model is created with the `/api/create` `from` and `adapters` fields.
 
+### Merging adapters into full models
+
+Ollama's adapter converter only accepts a few architectures (Llama, Mistral, Gemma families); other Safetensors adapters fail on import with `unsupported architecture`. For these, the **Merge into full model** form applies the LoRA to a local base model with PEFT on CPU and writes a new complete model into `./outputs`, which can then be imported through the regular Models & Ollama flow, including GGUF conversion. The UI automatically matches each adapter's `base_model_name_or_path` against local outputs, suggests the base model, and flags adapters that require merging. The base field also accepts a typed path under `/models` for local source models. Merging temporarily needs roughly the base model's size in free system RAM and disk space.
+
 Deleting a LoRA removes the local adapter under `/data/loras/<name>`. It does not delete Ollama models that were previously created from that adapter. LoRAs currently being downloaded or imported cannot be deleted.
 
 ## Manual Heretic Updates with A/B Slots

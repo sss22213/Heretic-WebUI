@@ -22,13 +22,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from .heretic_version import HereticVersionManager
-from .lora_manager import LoRAManager
+from .lora_manager import LoRAManager, adapter_supported_by_ollama, suggest_merge_base
 from .ollama_import import OllamaImportManager
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = ROOT / "app" / "static"
 DATA_DIR = Path(os.getenv("APP_DATA_DIR", ROOT / "data")).resolve()
 OUTPUT_DIR = Path(os.getenv("APP_OUTPUT_DIR", ROOT / "outputs")).resolve()
+MODELS_DIR = Path(os.getenv("APP_MODELS_DIR", "/models"))
 JOBS_DIR = DATA_DIR / "jobs"
 CHECKPOINT_DIR = DATA_DIR / "checkpoints"
 HF_TOKEN_FILE = DATA_DIR / "hf_token"
@@ -151,6 +152,12 @@ class LoRADownloadRequest(BaseModel):
         if any(ord(char) < 32 for char in value):
             raise ValueError("不可包含控制字元")
         return value or None
+
+
+class LoRAMergeRequest(BaseModel):
+    lora_name: str = Field(min_length=1, max_length=120, pattern=r"^[a-zA-Z0-9._-]+$")
+    base_output: str = Field(min_length=1, max_length=500, pattern=r"^[a-zA-Z0-9._/-]+$")
+    output_name: str = Field(min_length=1, max_length=120, pattern=r"^[a-zA-Z0-9._-]+$")
 
 
 class LoRAImportRequest(BaseModel):
@@ -734,7 +741,20 @@ def create_ollama_import(request: OllamaImportRequest):
 
 @app.get("/api/loras")
 def list_loras():
-    return lora_manager.list()
+    items = lora_manager.list()
+    outputs = {output["name"]: output for output in ollama_manager.list_outputs()}
+    for item in items:
+        if item.get("format") != "safetensors":
+            continue
+        suggested = suggest_merge_base(item.get("base_model"), list(outputs))
+        item["suggested_base"] = suggested
+        architectures = outputs[suggested]["architectures"] if suggested else []
+        # None means "no local base found, support unknown" — the UI only
+        # nudges toward merging when this is definitively False.
+        item["ollama_adapter_supported"] = (
+            adapter_supported_by_ollama(architectures) if architectures else None
+        )
+    return items
 
 
 @app.post("/api/loras/download", status_code=202)
@@ -766,6 +786,23 @@ def import_lora(request: LoRAImportRequest):
         return asdict(
             lora_manager.start_import(
                 request.lora_name, request.model_name, request.base_model, request.base_url
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/loras/merge", status_code=202)
+def merge_lora(request: LoRAMergeRequest):
+    if any(job.status in ("queued", "running") for job in manager.list()):
+        raise HTTPException(status_code=409, detail="Heretic 任務執行中，合併需要大量 RAM，請稍後再試")
+    try:
+        return asdict(
+            lora_manager.start_merge(
+                request.lora_name, request.base_output, request.output_name,
+                OUTPUT_DIR, MODELS_DIR,
             )
         )
     except ValueError as exc:

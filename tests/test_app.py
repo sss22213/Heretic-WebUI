@@ -3,6 +3,7 @@ import json
 import hashlib
 import subprocess
 import threading
+import time
 import tomllib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -37,7 +38,15 @@ from app.ollama_import import (
     parse_modelfile,
     resolve_import_format,
 )
-from app.lora_manager import LoRAManager, LoRATask, adapter_files, inspect_adapter
+from app.lora_manager import (
+    LoRAManager,
+    LoRATask,
+    adapter_files,
+    adapter_supported_by_ollama,
+    inspect_adapter,
+    suggest_merge_base,
+)
+from app.lora_merge import auxiliary_files, model_class_name
 from app.heretic_version import HereticVersionManager
 
 
@@ -886,3 +895,150 @@ def test_delete_output_blocks_active_import_and_path_traversal(tmp_path: Path):
     with pytest.raises(ValueError, match="無效"):
         manager.delete_output("../gemma")
     assert source.exists()
+
+
+def test_adapter_ollama_support_and_merge_base_suggestion():
+    assert adapter_supported_by_ollama(["LlamaForCausalLM"])
+    assert adapter_supported_by_ollama(["Gemma2ForCausalLM"])
+    assert not adapter_supported_by_ollama(["Qwen3_5ForConditionalGeneration"])
+    assert not adapter_supported_by_ollama([])
+
+    outputs = ["ThinkingCap-Qwen3.6-27B-heretic-6f87a8", "gemma-4-12B-it-heretic-b9a462"]
+    assert (
+        suggest_merge_base("bottlecapai/ThinkingCap-Qwen3.6-27B", outputs)
+        == "ThinkingCap-Qwen3.6-27B-heretic-6f87a8"
+    )
+    assert suggest_merge_base("google/gemma-4-12B-it", outputs) == "gemma-4-12B-it-heretic-b9a462"
+    assert suggest_merge_base("org/unrelated-model", outputs) is None
+    assert suggest_merge_base(None, outputs) is None
+
+
+def test_merge_auxiliary_files_exclude_weights_hidden_and_existing(tmp_path: Path):
+    base = tmp_path / "base"
+    output = tmp_path / "output"
+    base.mkdir()
+    output.mkdir()
+    (base / "model-00001-of-00002.safetensors").write_bytes(b"w")
+    (base / "model.safetensors.index.json").write_text("{}")
+    (base / "tokenizer.json").write_text("{}")
+    (base / "config.json").write_text("{}")
+    (base / ".hidden").write_text("x")
+    (output / "config.json").write_text("{}")
+
+    assert [path.name for path in auxiliary_files(base, output)] == ["tokenizer.json"]
+    assert model_class_name(base) is None
+    (base / "config.json").write_text(json.dumps({"architectures": ["Qwen3_5ForConditionalGeneration"]}))
+    assert model_class_name(base) == "Qwen3_5ForConditionalGeneration"
+
+
+def test_lora_merge_rejects_invalid_inputs(tmp_path: Path):
+    data = tmp_path / "data"
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    manager = LoRAManager(data)
+    gguf_only = data / "loras" / "ggufonly"
+    gguf_only.mkdir(parents=True)
+    (gguf_only / "adapter.gguf").write_bytes(b"g")
+    adapter = data / "loras" / "mylora"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}")
+    (adapter / "adapter_model.safetensors").write_bytes(b"w")
+    base = outputs / "base-model"
+    base.mkdir()
+    (base / "model.safetensors").write_bytes(b"weights")
+    (outputs / "already").mkdir()
+
+    with pytest.raises(ValueError, match="Safetensors"):
+        manager.start_merge("ggufonly", "base-model", "merged", outputs)
+    with pytest.raises(ValueError, match="基底"):
+        manager.start_merge("mylora", "missing-base", "merged", outputs)
+    with pytest.raises(ValueError, match="已存在"):
+        manager.start_merge("mylora", "base-model", "already", outputs)
+    with pytest.raises(ValueError, match="找不到 LoRA"):
+        manager.start_merge("missing", "base-model", "merged", outputs)
+    models = tmp_path / "models"
+    local_model = models / "my-base"
+    local_model.mkdir(parents=True)
+    with pytest.raises(ValueError, match="路徑形式"):
+        manager.start_merge("mylora", str(outputs / "base-model"), "merged", outputs, models)
+    with pytest.raises(ValueError, match="不支援路徑"):
+        manager.start_merge("mylora", str(local_model), "merged", outputs, None)
+    with pytest.raises(ValueError, match="完整的基底模型"):
+        manager.start_merge("mylora", str(local_model), "merged", outputs, models)
+
+
+def test_lora_merge_publishes_output_atomically(tmp_path: Path, monkeypatch):
+    data = tmp_path / "data"
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    manager = LoRAManager(data)
+    adapter = data / "loras" / "mylora"
+    adapter.mkdir(parents=True)
+    (adapter / "adapter_config.json").write_text(json.dumps({"base_model_name_or_path": "org/base"}))
+    (adapter / "adapter_model.safetensors").write_bytes(b"w")
+    base = outputs / "base-model"
+    base.mkdir()
+    (base / "model.safetensors").write_bytes(b"weights")
+    (base / "config.json").write_text("{}")
+
+    class FakeProcess:
+        def __init__(self, command, **_kwargs):
+            staging = Path(command[command.index("--output") + 1])
+            staging.mkdir(parents=True)
+            (staging / "model.safetensors").write_bytes(b"merged")
+            (staging / "config.json").write_text("{}")
+            self.stdout = iter(["合併完成\n"])
+            self.returncode = 0
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr("app.lora_manager.subprocess.Popen", FakeProcess)
+    task = manager.start_merge("mylora", "base-model", "merged-out", outputs)
+    assert task.operation == "merge"
+    for _ in range(100):
+        if manager.current.status in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+
+    assert manager.current.status == "completed", manager.current.error
+    assert (outputs / "merged-out" / "model.safetensors").read_bytes() == b"merged"
+    assert not (outputs / f".merge-{task.id}").exists()
+    assert "合併完成" in (data / "lora_tasks" / task.id / "run.log").read_text(encoding="utf-8")
+
+
+def test_lora_merge_accepts_models_dir_path_as_base(tmp_path: Path, monkeypatch):
+    data = tmp_path / "data"
+    outputs = tmp_path / "outputs"
+    models = tmp_path / "models"
+    outputs.mkdir()
+    manager = LoRAManager(data)
+    adapter = data / "loras" / "mylora"
+    adapter.mkdir(parents=True)
+    (adapter / "adapter_config.json").write_text("{}")
+    (adapter / "adapter_model.safetensors").write_bytes(b"w")
+    base = models / "my-base"
+    base.mkdir(parents=True)
+    (base / "model.safetensors").write_bytes(b"weights")
+
+    class FakeProcess:
+        def __init__(self, command, **_kwargs):
+            assert command[command.index("--base") + 1] == str(base.resolve())
+            staging = Path(command[command.index("--output") + 1])
+            staging.mkdir(parents=True)
+            (staging / "model.safetensors").write_bytes(b"merged")
+            self.stdout = iter([])
+            self.returncode = 0
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr("app.lora_manager.subprocess.Popen", FakeProcess)
+    manager.start_merge("mylora", str(base), "merged-out", outputs, models)
+    for _ in range(100):
+        if manager.current.status in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+
+    assert manager.current.status == "completed", manager.current.error
+    assert (outputs / "merged-out" / "model.safetensors").read_bytes() == b"merged"

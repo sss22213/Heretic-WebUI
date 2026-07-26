@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
 import shutil
+import subprocess
+import sys
 import threading
 import uuid
 from dataclasses import asdict, dataclass
@@ -14,11 +17,44 @@ from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
-from .ollama_import import OllamaClient, format_bytes
+from .ollama_import import OllamaClient, complete_safetensors_directory, format_bytes
+
+
+# Architectures whose Safetensors adapters Ollama's converter accepts today.
+# Anything else fails /api/create with "unsupported architecture" and must be
+# merged into a full model first.
+OLLAMA_ADAPTER_ARCHITECTURES = {
+    "LlamaForCausalLM",
+    "MistralForCausalLM",
+    "MixtralForCausalLM",
+    "GemmaForCausalLM",
+    "Gemma2ForCausalLM",
+    "Gemma3ForCausalLM",
+}
 
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def adapter_supported_by_ollama(architectures: list[str]) -> bool:
+    return bool(OLLAMA_ADAPTER_ARCHITECTURES.intersection(architectures))
+
+
+def _normalize_model_name(value: str) -> str:
+    tail = value.rsplit("/", 1)[-1]
+    return re.sub(r"[^a-z0-9]+", "", tail.lower())
+
+
+def suggest_merge_base(base_model: str | None, output_names: list[str]) -> str | None:
+    """Pick the local output that most likely matches an adapter's base model."""
+    if not base_model:
+        return None
+    normalized = _normalize_model_name(base_model)
+    if not normalized:
+        return None
+    matches = [name for name in output_names if normalized in _normalize_model_name(name)]
+    return sorted(matches, key=len)[0] if matches else None
 
 
 def adapter_files(directory: Path) -> list[Path]:
@@ -81,6 +117,7 @@ class LoRATask:
     bytes_completed: int = 0
     bytes_total: int = 0
     error: str | None = None
+    output_name: str | None = None
 
 
 class LoRAManager:
@@ -335,3 +372,102 @@ class LoRAManager:
         with self.lock:
             task.bytes_completed = completed
             self._persist(task)
+
+    def start_merge(
+        self,
+        name: str,
+        base_output: str,
+        output_name: str,
+        output_dir: Path,
+        models_dir: Path | None = None,
+    ) -> LoRATask:
+        name = self.validate_name(name)
+        output_name = self.validate_name(output_name)
+        directory = (self.root / name).resolve()
+        if directory.parent != self.root.resolve() or not directory.is_dir():
+            raise ValueError("找不到 LoRA")
+        details = inspect_adapter(directory)
+        if details["format"] != "safetensors":
+            raise ValueError("只有 Safetensors adapter 可以合併；GGUF adapter 請直接匯入 Ollama")
+        base_output = base_output.strip()
+        if "/" in base_output:
+            # Path form: a manually entered model directory (e.g. /models/my-model).
+            if models_dir is None:
+                raise ValueError("此部署不支援路徑形式的基底模型")
+            base = Path(base_output).resolve()
+            if not base.is_relative_to(models_dir.resolve()):
+                raise ValueError(f"路徑形式的基底模型必須位於 {models_dir} 內")
+        else:
+            base = (output_dir / base_output).resolve()
+            if base.parent != output_dir.resolve():
+                raise ValueError("無效的基底 output 名稱")
+        if not complete_safetensors_directory(base):
+            raise ValueError("找不到完整的基底模型（需含全部 Safetensors 分片）")
+        destination = (output_dir / output_name).resolve()
+        if destination.parent != output_dir.resolve() or destination.name.startswith("."):
+            raise ValueError("無效的輸出名稱")
+        if destination.exists():
+            raise ValueError("同名 output 已存在，請使用其他名稱")
+        base_size = sum(
+            path.stat().st_size for path in base.rglob("*.safetensors") if path.is_file()
+        )
+        free = shutil.disk_usage(output_dir).free
+        if free < int(base_size * 1.05):
+            raise RuntimeError(
+                f"合併空間不足：預估需要 {format_bytes(int(base_size * 1.05))}，"
+                f"目前只有 {format_bytes(free)} 可用。"
+            )
+        task = self._new_task("merge", name, base_model=base_output, output_name=output_name)
+        threading.Thread(target=self._merge, args=(task.id, base, output_dir), daemon=True).start()
+        return task
+
+    def _merge(self, task_id: str, base: Path, output_dir: Path) -> None:
+        with self.lock:
+            task = self.current
+            if task is None or task.id != task_id:
+                return
+            task.status = "running"
+            task.phase = "merging"
+            task.started_at = utc_now()
+            self._persist(task)
+        staging = output_dir / f".merge-{task.id}"
+        try:
+            command = [
+                sys.executable, "-u", "-m", "app.lora_merge",
+                "--base", str(base),
+                "--adapter", str(self.root / task.lora_name),
+                "--output", str(staging),
+            ]
+            self._log(task, f"執行：{shlex.join(command)}")
+            shutil.rmtree(staging, ignore_errors=True)
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+            except OSError as exc:
+                raise RuntimeError(f"無法啟動合併程序：{exc}") from exc
+            assert process.stdout is not None
+            for line in process.stdout:
+                self._log(task, line.rstrip())
+            if process.wait() != 0:
+                raise RuntimeError(f"合併程序失敗（exit code {process.returncode}）")
+            if not complete_safetensors_directory(staging):
+                raise RuntimeError("合併程序未產生完整的模型輸出")
+            staging.replace(output_dir / (task.output_name or ""))
+            with self.lock:
+                task.status = "completed"
+                task.phase = "completed"
+                task.finished_at = utc_now()
+                self._log(task, f"合併完成：{task.output_name}（可從「模型與 Ollama」頁面匯入）")
+        except Exception as exc:
+            shutil.rmtree(staging, ignore_errors=True)
+            with self.lock:
+                task.status = "failed"
+                task.phase = "failed"
+                task.error = str(exc)
+                task.finished_at = utc_now()
+                self._log(task, f"錯誤：{exc}")

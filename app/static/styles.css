@@ -126,6 +126,7 @@ details[open] .chevron { transform: rotate(180deg); }
 .model-copy { min-width: 0; }
 .model-copy strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
 .model-copy small { display: block; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-tertiary); font: 10px/1.4 ui-monospace, monospace; }
+.merge-hint { color: #c47f17; font-weight: 600; }
 .model-delete { width: 34px; height: 34px; padding: 0; color: var(--ink-tertiary); background: transparent; border: 1px solid transparent; border-radius: 8px; }
 .model-delete:hover { color: var(--ink); background: var(--surface-3); border-color: var(--hairline-strong); }
 .import-panel { margin-top: 18px; overflow: hidden; background: var(--canvas); border: 1px solid var(--hairline); border-radius: 16px; }

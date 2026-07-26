@@ -67,6 +67,8 @@ Gemma 4 需要 Transformers 5。映像不會直接安裝 llama.cpp 的通用 req
 
 匯入時需指定 Ollama 內已有、且與 adapter 訓練時相同的基底模型。若 `adapter_config.json` 含有 `base_model_name_or_path`，介面會自動帶入供確認。WebUI 會把 adapter 上傳至 Ollama blob API，再以 `/api/create` 的 `from` 與 `adapters` 建立新模型。Ollama 官方目前支援 Llama、Mistral 與部分 Gemma Safetensors adapter，也可使用 GGUF adapter；基底模型不符或不同量化方式的 QLoRA 可能產生不正常結果。
 
+Ollama 的 adapter 轉換器只支援少數架構（Llama、Mistral、Gemma 系列），其他 Safetensors adapter 匯入時會回報 `unsupported architecture`。此時可改用「合併為完整模型」表單：以 PEFT 在 CPU 上將 LoRA 合併進本機基底 output，產生新的完整模型寫入 `./outputs`，再走一般的「模型與 Ollama」流程匯入（含 GGUF 轉換）。介面會自動比對 adapter 的 `base_model_name_or_path` 與本機 outputs、帶入建議基底，並在 adapter 需要合併時顯示提示；基底欄位也可直接輸入 `/models` 內的本機模型路徑。合併期間約需相當於基底模型大小的 RAM 與磁碟空間。
+
 刪除 LoRA 只會移除 `/data/loras/<name>` 的本機 adapter，不會自動刪除已建立的 Ollama 模型。正在下載或匯入的 LoRA 會拒絕刪除。
 
 ## Heretic 版本管理
