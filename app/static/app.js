@@ -157,7 +157,7 @@ function renderLoras() {
   $('#loraLibrary').innerHTML = state.loras.map((item) => `
     <article class="model-card">
       <div class="model-icon">⧉</div>
-      <div class="model-copy"><strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong><small>${formatBytes(item.size)} · ${escapeHtml(item.format)} · ${escapeHtml(item.base_model || item.repo_id || 'base model 未知')}${item.ollama_adapter_supported === false ? ' · <span class="merge-hint">此架構需先合併</span>' : ''}</small></div>
+      <div class="model-copy"><strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong><small>${formatBytes(item.size)} · ${escapeHtml(item.format)} · ${escapeHtml(item.base_model || item.repo_id || 'base model 未知')}</small>${item.ollama_adapter_supported === false ? '<small class="merge-hint">此架構需先合併</small>' : ''}</div>
       <button class="model-delete" data-delete-lora="${escapeHtml(item.name)}" title="刪除 LoRA" aria-label="刪除 LoRA">×</button>
     </article>`).join('');
   document.querySelectorAll('[data-delete-lora]').forEach((button) => button.addEventListener('click', () => deleteLora(button.dataset.deleteLora)));
