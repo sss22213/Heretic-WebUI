@@ -163,7 +163,8 @@ class LoRADownloadRequest(BaseModel):
 
 class LoRAMergeRequest(BaseModel):
     lora_name: str = Field(min_length=1, max_length=120, pattern=r"^[a-zA-Z0-9._-]+$")
-    base_output: str = Field(min_length=1, max_length=500, pattern=r"^[a-zA-Z0-9._/-]+$")
+    # ":" is accepted so Ollama-style tags reach start_merge's explanatory error.
+    base_output: str = Field(min_length=1, max_length=500, pattern=r"^[a-zA-Z0-9._/:-]+$")
     output_name: str = Field(min_length=1, max_length=120, pattern=r"^[a-zA-Z0-9._-]+$")
 
 
@@ -826,7 +827,7 @@ def merge_lora(request: LoRAMergeRequest):
         return asdict(
             lora_manager.start_merge(
                 request.lora_name, request.base_output, request.output_name,
-                OUTPUT_DIR, MODELS_DIR,
+                OUTPUT_DIR, MODELS_DIR, hf_token_store.get(),
             )
         )
     except ValueError as exc:

@@ -962,6 +962,10 @@ def test_lora_merge_rejects_invalid_inputs(tmp_path: Path):
         manager.start_merge("mylora", "base-model", "already", outputs)
     with pytest.raises(ValueError, match="找不到 LoRA"):
         manager.start_merge("missing", "base-model", "merged", outputs)
+    with pytest.raises(ValueError, match="Ollama"):
+        manager.start_merge("mylora", "qwen3.6:27b", "merged", outputs)
+    with pytest.raises(ValueError, match="organization/repository"):
+        manager.start_merge("mylora", "a/b/c", "merged", outputs)
     models = tmp_path / "models"
     local_model = models / "my-base"
     local_model.mkdir(parents=True)
@@ -1011,6 +1015,53 @@ def test_lora_merge_publishes_output_atomically(tmp_path: Path, monkeypatch):
     assert (outputs / "merged-out" / "model.safetensors").read_bytes() == b"merged"
     assert not (outputs / f".merge-{task.id}").exists()
     assert "合併完成" in (data / "lora_tasks" / task.id / "run.log").read_text(encoding="utf-8")
+
+
+def test_lora_merge_downloads_hf_base(tmp_path: Path, monkeypatch):
+    data = tmp_path / "data"
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    manager = LoRAManager(data)
+    adapter = data / "loras" / "mylora"
+    adapter.mkdir(parents=True)
+    (adapter / "adapter_config.json").write_text("{}")
+    (adapter / "adapter_model.safetensors").write_bytes(b"w")
+    snapshot = tmp_path / "hf-cache" / "snap"
+
+    def fake_snapshot_download(repo_id, token=None, ignore_patterns=None):
+        assert repo_id == "Qwen/Qwen3.6-27B"
+        assert token == "hf_secret"
+        snapshot.mkdir(parents=True, exist_ok=True)
+        (snapshot / "model.safetensors").write_bytes(b"weights")
+        (snapshot / "config.json").write_text("{}")
+        return str(snapshot)
+
+    class FakeProcess:
+        def __init__(self, command, **_kwargs):
+            assert command[command.index("--base") + 1] == str(snapshot)
+            staging = Path(command[command.index("--output") + 1])
+            staging.mkdir(parents=True)
+            (staging / "model.safetensors").write_bytes(b"merged")
+            self.stdout = iter([])
+            self.returncode = 0
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr("app.lora_manager.snapshot_download", fake_snapshot_download)
+    monkeypatch.setattr("app.lora_manager.subprocess.Popen", FakeProcess)
+    task = manager.start_merge(
+        "mylora", "Qwen/Qwen3.6-27B", "merged-out", outputs, None, "hf_secret"
+    )
+    for _ in range(100):
+        if manager.current.status in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+
+    assert manager.current.status == "completed", manager.current.error
+    assert (outputs / "merged-out" / "model.safetensors").read_bytes() == b"merged"
+    log = (data / "lora_tasks" / task.id / "run.log").read_text(encoding="utf-8")
+    assert "下載基底模型" in log
 
 
 def test_lora_merge_accepts_models_dir_path_as_base(tmp_path: Path, monkeypatch):

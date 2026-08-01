@@ -184,14 +184,17 @@ function renderMergeForm() {
 function applyMergeSuggestion() {
   const lora = state.loras.find((item) => item.name === $('#mergeLoraSelect').value);
   const help = $('#mergeBaseHelp');
-  if (!lora) { help.textContent = '會自動比對 adapter 的 base_model 建議基底；也可輸入 /models 內的模型路徑。'; return; }
+  if (!lora) { help.textContent = '會自動比對 adapter 的 base_model 建議基底；也可輸入 /models 路徑或 Hugging Face model ID（會自動下載至快取）。'; return; }
   const baseInput = $('#mergeBaseSelect');
   if (lora.suggested_base && state.outputs.some((output) => output.name === lora.suggested_base)) {
     if (!baseInput.value) baseInput.value = lora.suggested_base;
     help.textContent = `已依 adapter 設定（${lora.base_model || '未知'}）建議基底：${lora.suggested_base}`;
+  } else if (lora.base_model && /^[\w.-]+\/[\w.-]+$/.test(lora.base_model)) {
+    if (!baseInput.value) baseInput.value = lora.base_model;
+    help.textContent = `找不到符合的本機 output，已填入 adapter 的 HF 基底「${lora.base_model}」；合併時會自動下載至快取（需足夠磁碟空間），也可改選本機 output 或 /models 路徑。`;
   } else {
     help.textContent = lora.base_model
-      ? `找不到符合「${lora.base_model}」的本機 output，請從清單選擇或輸入 /models 路徑。`
+      ? `找不到符合「${lora.base_model}」的本機 output，請從清單選擇、輸入 /models 路徑或 HF model ID。`
       : '此 adapter 未記錄 base model，請確認選擇的基底正確。';
   }
   const output = $('#mergeOutputName');
@@ -604,6 +607,11 @@ $('#loraMergeForm').addEventListener('submit', async (event) => {
 
 $('#mergeLoraSelect').addEventListener('change', () => { $('#mergeOutputName').value = ''; applyMergeSuggestion(); });
 $('#mergeBaseSelect').addEventListener('change', applyMergeSuggestion);
+$('#mergeBaseSelect').addEventListener('input', (event) => {
+  if (event.target.value.includes(':')) {
+    $('#mergeBaseHelp').textContent = 'Ollama 模型（GGUF）無法作為合併基底；請輸入 outputs 名稱、/models 路徑或 HF model ID（例：Qwen/Qwen3.6-27B）。';
+  }
+});
 $('#loraSelect').addEventListener('change', updateLoraImportHint);
 
 $('#refreshEvalsButton').addEventListener('click', () => {

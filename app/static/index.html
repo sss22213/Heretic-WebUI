@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Heretic WebUI</title>
   <meta name="description" content="Heretic model abliteration workspace">
-  <link rel="stylesheet" href="/static/styles.css?v=20260801-1">
+  <link rel="stylesheet" href="/static/styles.css?v=20260801-2">
 </head>
 <body>
   <header class="topbar">
@@ -208,7 +208,7 @@
               <div class="section-heading"><span class="section-index">03</span><div><h2>合併為完整模型</h2><p>以 PEFT 將 Safetensors adapter 合併進本機 output，適用於 Ollama 不支援 adapter 轉換的架構。</p></div></div>
               <div class="fields two-col">
                 <label class="field span-2"><span>LoRA（Safetensors）</span><select name="lora_name" id="mergeLoraSelect" required><option value="">尚無 LoRA</option></select></label>
-                <label class="field span-2"><span>基底模型</span><input name="base_output" id="mergeBaseSelect" list="mergeBaseOptions" required pattern="[a-zA-Z0-9._/-]+" placeholder="選擇 output，或輸入 /models/模型路徑"><datalist id="mergeBaseOptions"></datalist><small id="mergeBaseHelp">會自動比對 adapter 的 base_model 建議基底；也可輸入 /models 內的模型路徑。</small></label>
+                <label class="field span-2"><span>基底模型</span><input name="base_output" id="mergeBaseSelect" list="mergeBaseOptions" required pattern="[a-zA-Z0-9._/:-]+" placeholder="選擇 output、輸入 /models 路徑或 HF model ID"><datalist id="mergeBaseOptions"></datalist><small id="mergeBaseHelp">會自動比對 adapter 的 base_model 建議基底；也可輸入 /models 路徑或 Hugging Face model ID（會自動下載至快取）。</small></label>
                 <label class="field span-2"><span>新 output 名稱</span><input name="output_name" id="mergeOutputName" required pattern="[a-zA-Z0-9._-]+" placeholder="model-with-lora"></label>
               </div>
               <div class="notice">合併在 CPU 上執行並寫入 outputs（約需與基底模型相同的 RAM 與磁碟空間）；完成後可從「模型與 Ollama」頁面匯入。</div>
@@ -270,7 +270,7 @@
     </div>
   </div>
   <div class="toast" id="toast" role="status"></div>
-  <script src="/static/i18n.js?v=20260801-1"></script>
-  <script src="/static/app.js?v=20260801-1"></script>
+  <script src="/static/i18n.js?v=20260801-2"></script>
+  <script src="/static/app.js?v=20260801-2"></script>
 </body>
 </html>

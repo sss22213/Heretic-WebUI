@@ -380,6 +380,7 @@ class LoRAManager:
         output_name: str,
         output_dir: Path,
         models_dir: Path | None = None,
+        hf_token: str | None = None,
     ) -> LoRATask:
         name = self.validate_name(name)
         output_name = self.validate_name(output_name)
@@ -390,24 +391,47 @@ class LoRAManager:
         if details["format"] != "safetensors":
             raise ValueError("只有 Safetensors adapter 可以合併；GGUF adapter 請直接匯入 Ollama")
         base_output = base_output.strip()
-        if "/" in base_output:
+        if ":" in base_output:
+            raise ValueError(
+                "Ollama 模型（GGUF）無法作為合併基底；請輸入 outputs 名稱、"
+                "/models 路徑，或 Hugging Face model ID（例：Qwen/Qwen3.6-27B）"
+            )
+        hf_repo: str | None = None
+        base: Path | None
+        if base_output.startswith("/"):
             # Path form: a manually entered model directory (e.g. /models/my-model).
             if models_dir is None:
                 raise ValueError("此部署不支援路徑形式的基底模型")
             base = Path(base_output).resolve()
             if not base.is_relative_to(models_dir.resolve()):
                 raise ValueError(f"路徑形式的基底模型必須位於 {models_dir} 內")
+        elif re.fullmatch(r"[\w.-]+/[\w.-]+", base_output):
+            # Hugging Face repo ID: downloaded to the HF cache by the worker.
+            hf_repo = base_output
+            base = None
+        elif "/" in base_output:
+            raise ValueError("Hugging Face model ID 格式應為 organization/repository")
         else:
             base = (output_dir / base_output).resolve()
             if base.parent != output_dir.resolve():
                 raise ValueError("無效的基底 output 名稱")
-        if not complete_safetensors_directory(base):
+        if base is not None and not complete_safetensors_directory(base):
             raise ValueError("找不到完整的基底模型（需含全部 Safetensors 分片）")
         destination = (output_dir / output_name).resolve()
         if destination.parent != output_dir.resolve() or destination.name.startswith("."):
             raise ValueError("無效的輸出名稱")
         if destination.exists():
             raise ValueError("同名 output 已存在，請使用其他名稱")
+        if base is not None:
+            self._check_merge_disk_space(base, output_dir)
+        task = self._new_task("merge", name, base_model=base_output, output_name=output_name)
+        threading.Thread(
+            target=self._merge, args=(task.id, base, output_dir, hf_repo, hf_token), daemon=True
+        ).start()
+        return task
+
+    @staticmethod
+    def _check_merge_disk_space(base: Path, output_dir: Path) -> None:
         base_size = sum(
             path.stat().st_size for path in base.rglob("*.safetensors") if path.is_file()
         )
@@ -417,11 +441,15 @@ class LoRAManager:
                 f"合併空間不足：預估需要 {format_bytes(int(base_size * 1.05))}，"
                 f"目前只有 {format_bytes(free)} 可用。"
             )
-        task = self._new_task("merge", name, base_model=base_output, output_name=output_name)
-        threading.Thread(target=self._merge, args=(task.id, base, output_dir), daemon=True).start()
-        return task
 
-    def _merge(self, task_id: str, base: Path, output_dir: Path) -> None:
+    def _merge(
+        self,
+        task_id: str,
+        base: Path | None,
+        output_dir: Path,
+        hf_repo: str | None = None,
+        hf_token: str | None = None,
+    ) -> None:
         with self.lock:
             task = self.current
             if task is None or task.id != task_id:
@@ -432,6 +460,26 @@ class LoRAManager:
             self._persist(task)
         staging = output_dir / f".merge-{task.id}"
         try:
+            if hf_repo is not None:
+                with self.lock:
+                    task.phase = "downloading"
+                    self._persist(task)
+                self._log(task, f"從 Hugging Face 下載基底模型：{hf_repo}（使用快取，支援續傳）…")
+                base = Path(
+                    snapshot_download(
+                        repo_id=hf_repo,
+                        token=hf_token,
+                        ignore_patterns=["*.gguf", "*.pth", "original/*", "consolidated*"],
+                    )
+                )
+                if not complete_safetensors_directory(base):
+                    raise RuntimeError("下載內容不含完整的 Safetensors 權重，無法作為合併基底")
+                self._check_merge_disk_space(base, output_dir)
+                self._log(task, f"基底模型就緒：{base}")
+                with self.lock:
+                    task.phase = "merging"
+                    self._persist(task)
+            assert base is not None
             command = [
                 sys.executable, "-u", "-m", "app.lora_merge",
                 "--base", str(base),
