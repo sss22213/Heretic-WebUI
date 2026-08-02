@@ -76,7 +76,7 @@ Ollama 的 adapter 轉換器只支援少數架構（Llama、Mistral、Gemma 系�
 「跑分評測」頁面以 EleutherAI 的 [LM Evaluation Harness](https://github.com/EleutherAI/lm-evaluation-harness) 對模型執行標準評測，提供兩種後端：
 
 - **本機 Safetensors（Transformers）**：把 `./outputs` 內權重完整的 output、`/models` 內的本機模型，或 Hugging Face model ID（會下載至共用快取）載入 GPU 評測。支援所有 lm-eval 任務，包含選擇題（loglikelihood）類型。
-- **Ollama 模型（GGUF，經 API）**：透過 Ollama 的 OpenAI 相容 API（`local-chat-completions`）直接評測已部署的模型，分數反映實際使用的量化 GGUF 版本。頁面會列出 Ollama 內可用的模型，開始前也會先確認模型存在。由於該 API 不提供 logprobs，此模式只支援生成式任務（例如 `gsm8k`、`gsm8k_cot`、`drop`、`triviaqa`、`nq_open`）；`hellaswag`、`mmlu` 等選擇題任務請改用 Safetensors 後端。此模式會自動中和任務定義的 completion 式停止字串（如 gsm8k 的 `Question:`）— Ollama 會把停止字串套用在原始 token 流上，推理模型的思考內容會誤觸而在給出答案前被切斷。
+- **Ollama 模型（GGUF，經 API）**：透過 Ollama 的 OpenAI 相容 API（`local-chat-completions`）直接評測已部署的模型，分數反映實際使用的量化 GGUF 版本。頁面會列出 Ollama 內可用的模型，開始前也會先確認模型存在。由於該 API 不提供 logprobs，此模式只支援生成式任務（例如 `gsm8k`、`gsm8k_cot`、`minerva_math`、`bbh_cot_fewshot`、`mgsm_native_cot_zh`、`drop`、`triviaqa`、`nq_open`）；`hellaswag`、`mmlu` 等選擇題任務請改用 Safetensors 後端。此模式會自動中和任務定義的 completion 式停止字串（如 gsm8k 的 `Question:`）— Ollama 會把停止字串套用在原始 token 流上，推理模型的思考內容會誤觸而在給出答案前被切斷。
 
 常用任務（`hellaswag`、`arc_easy`、`arc_challenge`、`winogrande`、`piqa`、`mmlu`、`gsm8k`、`truthfulqa_mc2`）可直接勾選，也可手動輸入任何 lm-eval 任務名稱。可調選項：
 

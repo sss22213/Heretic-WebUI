@@ -634,6 +634,8 @@ $('#evalBackend').addEventListener('change', () => {
     $('#evalNotice').textContent = ollama ? EVAL_NOTICE_OLLAMA : EVAL_NOTICE_DEFAULT;
   }
   $('#evalModelSource').value = '';
+  const maxGen = $('#evalMaxGenToks');
+  if (ollama && !maxGen.value) maxGen.value = '2048';
   if (ollama) refreshOllamaModels();
   renderEvalForm();
 });

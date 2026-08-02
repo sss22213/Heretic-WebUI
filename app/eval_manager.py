@@ -40,6 +40,9 @@ PRESET_TASKS = [
 PRESET_TASKS_OLLAMA = [
     "gsm8k",
     "gsm8k_cot",
+    "minerva_math",
+    "bbh_cot_fewshot",
+    "mgsm_native_cot_zh",
     "drop",
     "triviaqa",
     "nq_open",
