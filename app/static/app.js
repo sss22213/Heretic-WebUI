@@ -651,6 +651,19 @@ $('#evalBackend').addEventListener('change', () => {
   renderEvalForm();
 });
 $('#evalBaseUrl').addEventListener('change', () => { if ($('#evalBackend').value === 'ollama') refreshOllamaModels(); });
+let evalBaseUrlDebounce = 0;
+$('#evalBaseUrl').addEventListener('input', () => {
+  window.clearTimeout(evalBaseUrlDebounce);
+  evalBaseUrlDebounce = window.setTimeout(() => {
+    if ($('#evalBackend').value === 'ollama') refreshOllamaModels();
+  }, 600);
+});
+// Enter inside the form would submit and start an eval; confirm the URL instead.
+$('#evalBaseUrl').addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  if ($('#evalBackend').value === 'ollama') refreshOllamaModels();
+});
 $('#evalForm').addEventListener('submit', async (event) => {
   event.preventDefault(); const button = $('#evalSubmitButton'); button.disabled = true;
   const form = event.target;
