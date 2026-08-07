@@ -881,7 +881,9 @@ def list_ollama_models(base_url: str | None = Query(default=None, max_length=500
     if not url.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="Ollama API 位址必須以 http:// 或 https:// 開頭")
     try:
-        items = OllamaClient(url).tags().get("models", [])
+        # Short timeout: this backs an interactive dropdown, unlike the import
+        # workers whose day-long default covers blob uploads.
+        items = OllamaClient(url, timeout=10).tags().get("models", [])
         names = sorted({
             str(item.get("name") or item.get("model"))
             for item in items

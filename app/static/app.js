@@ -287,13 +287,24 @@ function renderEvalForm() {
   if (presets.length) grid.dataset.backend = $('#evalBackend').value;
 }
 
+let ollamaModelsRequest = 0;
+
 async function refreshOllamaModels() {
+  // Sequence guard: a slow fetch for a previous address must not overwrite
+  // the list for the address currently in the field.
+  const requestId = ++ollamaModelsRequest;
   const base = $('#evalBaseUrl').value.trim();
   try {
     const data = await api(`/api/ollama/models${base ? `?base_url=${encodeURIComponent(base)}` : ''}`);
+    if (requestId !== ollamaModelsRequest) return;
     state.ollamaModels = data.models || [];
     renderEvalForm();
-  } catch (error) { toast(`Ollama 模型清單取得失敗：${error?.message || error}`); }
+  } catch (error) {
+    if (requestId !== ollamaModelsRequest) return;
+    state.ollamaModels = [];
+    renderEvalForm();
+    toast(`Ollama 模型清單取得失敗：${error?.message || error}`);
+  }
 }
 
 function renderEvalRuns() {

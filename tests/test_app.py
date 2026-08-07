@@ -1327,3 +1327,23 @@ def test_eval_start_ollama_requires_base_url(tmp_path: Path, monkeypatch):
             "bad//name::", ["gsm8k"], None, None, 0, "none",
             backend="ollama", base_url="http://ollama:11434",
         )
+
+
+def test_ollama_model_list_uses_short_timeout_and_selected_url(monkeypatch):
+    import app.main as main_module
+
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, base_url, timeout=86_400):
+            captured["base_url"] = base_url
+            captured["timeout"] = timeout
+
+        def tags(self):
+            return {"models": [{"name": "b:latest"}, {"model": "a:latest"}, {"name": "b:latest"}]}
+
+    monkeypatch.setattr(main_module, "OllamaClient", FakeClient)
+    result = main_module.list_ollama_models(base_url="http://10.0.0.5:11434")
+    assert result == {"models": ["a:latest", "b:latest"]}
+    assert captured["base_url"] == "http://10.0.0.5:11434"
+    assert captured["timeout"] <= 30
