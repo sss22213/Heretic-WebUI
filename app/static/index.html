@@ -241,6 +241,8 @@
               <label class="field"><span>題數上限（每任務）</span><input type="number" name="limit" min="1" placeholder="全部"><small>快速比較可先用 100–200 題；正式分數請留空。</small></label>
               <label class="field"><span>Batch size</span><input type="number" name="batch_size" min="0" max="512" value="0"><small>0 代表自動偵測。</small></label>
               <label class="field"><span>最大生成 tokens</span><input type="number" name="max_gen_toks" id="evalMaxGenToks" min="16" max="32768" placeholder="任務預設"><small>推理（thinking）模型必填，建議 2048 以上；預設額度（多為 256）會被思考內容佔滿而得 0 分。</small></label>
+              <label class="field" id="evalConcurrencyField" hidden><span>並行請求數</span><input type="number" name="num_concurrent" id="evalNumConcurrent" min="1" max="64" placeholder="預設 1"><small>Ollama 端需設 OLLAMA_NUM_PARALLEL ≥ 此值，否則多出的請求只會排隊。</small></label>
+              <label class="field" id="evalRetriesField" hidden><span>API 重試次數</span><input type="number" name="max_retries" id="evalMaxRetries" min="1" max="10" placeholder="預設 3"><small>單一請求失敗時的重試上限。</small></label>
               <label class="toggle-field"><input type="checkbox" name="log_samples"><span class="toggle"></span><span><strong>保存每題輸出</strong><small>寫入 results 目錄，方便檢查模型實際回答。</small></span></label>
             </div>
             <div class="notice" id="evalNotice">評測與 Heretic 任務共用 GPU，同一時間只能執行一項。4-bit 量化模型的分數會與 BF16 略有差異，比較時請使用相同設定。</div>
@@ -271,6 +273,6 @@
   </div>
   <div class="toast" id="toast" role="status"></div>
   <script src="/static/i18n.js?v=20260802-1"></script>
-  <script src="/static/app.js?v=20260808-2"></script>
+  <script src="/static/app.js?v=20260808-3"></script>
 </body>
 </html>

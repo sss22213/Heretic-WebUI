@@ -1316,6 +1316,16 @@ def test_eval_ollama_backend_command_and_validation(tmp_path: Path):
     assert command[command.index("--num_fewshot") + 1] == "5"
     assert command[command.index("--limit") + 1] == "100"
 
+    tuned = EvalRun(
+        id="def", status="queued", created_at="now",
+        model_source="thinkingcap-q4:latest", model_path="thinkingcap-q4:latest",
+        tasks=["gsm8k"], backend="ollama", base_url="http://ollama:11434",
+        num_concurrent=8, max_retries=5,
+    )
+    tuned_args = manager.command(tuned)[manager.command(tuned).index("--model_args") + 1]
+    assert "num_concurrent=8" in tuned_args
+    assert "max_retries=5" in tuned_args
+
 
 def test_eval_start_ollama_requires_base_url(tmp_path: Path, monkeypatch):
     manager = EvalManager(tmp_path / "data", tmp_path / "outputs")

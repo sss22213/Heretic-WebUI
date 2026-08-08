@@ -318,6 +318,7 @@ function renderEvalRuns() {
       run.num_fewshot === null ? 'few-shot 預設' : `few-shot ${run.num_fewshot}`,
       run.limit ? `每任務 ${run.limit} 題` : '全部題目',
       run.max_gen_toks ? `生成上限 ${run.max_gen_toks} tokens` : null,
+      run.num_concurrent ? `並行 ${run.num_concurrent}` : null,
       run.backend === 'ollama' ? 'GGUF（Ollama）' : (run.quantization === 'bnb_4bit' ? '4-bit' : 'BF16'),
     ].filter(Boolean).join(' · ');
     const metrics = Object.entries(run.results || {}).map(([task, values]) => `
@@ -634,6 +635,8 @@ $('#evalBackend').addEventListener('change', () => {
   $('#evalBaseUrlField').hidden = !ollama;
   $('#evalBaseUrl').required = ollama;
   $('#evalQuantField').hidden = ollama;
+  $('#evalConcurrencyField').hidden = !ollama;
+  $('#evalRetriesField').hidden = !ollama;
   $('#evalModelSource').hidden = ollama;
   $('#evalModelSource').required = !ollama;
   $('#evalModelSelect').hidden = !ollama;
@@ -683,6 +686,8 @@ $('#evalForm').addEventListener('submit', async (event) => {
   if (backend === 'ollama') {
     payload.base_url = form.elements.base_url.value.trim();
     payload.quantization = 'none';
+    if (form.elements.num_concurrent.value !== '') payload.num_concurrent = Number(form.elements.num_concurrent.value);
+    if (form.elements.max_retries.value !== '') payload.max_retries = Number(form.elements.max_retries.value);
   }
   if (form.elements.num_fewshot.value !== '') payload.num_fewshot = Number(form.elements.num_fewshot.value);
   if (form.elements.limit.value !== '') payload.limit = Number(form.elements.limit.value);

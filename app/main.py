@@ -201,6 +201,8 @@ class EvalRequest(BaseModel):
     backend: Literal["hf", "ollama"] = "hf"
     base_url: str | None = Field(default=None, max_length=500)
     max_gen_toks: int | None = Field(default=None, ge=16, le=32768)
+    num_concurrent: int | None = Field(default=None, ge=1, le=64)
+    max_retries: int | None = Field(default=None, ge=1, le=10)
     log_samples: bool = False
 
 
@@ -866,7 +868,9 @@ def create_eval(request: EvalRequest):
                 request.model_source, tasks, request.num_fewshot, request.limit,
                 request.batch_size, request.quantization, hf_token_store.get(),
                 backend=request.backend, base_url=request.base_url,
-                max_gen_toks=request.max_gen_toks, log_samples=request.log_samples,
+                max_gen_toks=request.max_gen_toks,
+                num_concurrent=request.num_concurrent, max_retries=request.max_retries,
+                log_samples=request.log_samples,
             )
         )
     except ValueError as exc:

@@ -119,6 +119,8 @@ class EvalRun:
     backend: str = "hf"
     base_url: str | None = None
     max_gen_toks: int | None = None
+    num_concurrent: int | None = None
+    max_retries: int | None = None
     log_samples: bool = False
     started_at: str | None = None
     finished_at: str | None = None
@@ -226,8 +228,8 @@ class EvalManager:
             model_args = [
                 f"model={run.model_path}",
                 f"base_url={run.base_url}/v1/chat/completions",
-                "num_concurrent=1",
-                "max_retries=3",
+                f"num_concurrent={run.num_concurrent or 1}",
+                f"max_retries={run.max_retries if run.max_retries is not None else 3}",
             ]
             command = [
                 sys.executable, "-u", "-m", "lm_eval",
@@ -299,6 +301,8 @@ class EvalManager:
         backend: str = "hf",
         base_url: str | None = None,
         max_gen_toks: int | None = None,
+        num_concurrent: int | None = None,
+        max_retries: int | None = None,
         log_samples: bool = False,
     ) -> EvalRun:
         if not lm_eval_available():
@@ -313,6 +317,8 @@ class EvalManager:
             else:
                 model_path = self.resolve_model(model_source)
                 base_url = None
+                num_concurrent = None
+                max_retries = None
             run = EvalRun(
                 id=uuid.uuid4().hex[:12],
                 status="queued",
@@ -327,6 +333,8 @@ class EvalManager:
                 backend=backend,
                 base_url=base_url,
                 max_gen_toks=max_gen_toks,
+                num_concurrent=num_concurrent,
+                max_retries=max_retries,
                 log_samples=log_samples,
             )
             self.runs[run.id] = run
