@@ -122,6 +122,7 @@ class EvalRun:
     num_concurrent: int | None = None
     max_retries: int | None = None
     log_samples: bool = False
+    use_cache: bool = False
     started_at: str | None = None
     finished_at: str | None = None
     error: str | None = None
@@ -271,6 +272,15 @@ class EvalManager:
             command += ["--gen_kwargs", ",".join(gen_kwargs)]
         if run.log_samples:
             command.append("--log_samples")
+        if run.use_cache:
+            # Response-level cache shared across runs of the same model, so an
+            # interrupted eval resumes instead of re-answering finished items.
+            # lm-eval appends "_rank<N>.db" to this prefix; keep it per-model
+            # because cache keys hash only the request, not the model.
+            cache_root = self.root / "cache"
+            cache_root.mkdir(parents=True, exist_ok=True)
+            slug = re.sub(r"[^A-Za-z0-9._-]+", "-", run.model_source.strip()) or "model"
+            command += ["--use_cache", str(cache_root / slug)]
         return command
 
     @staticmethod
@@ -304,6 +314,7 @@ class EvalManager:
         num_concurrent: int | None = None,
         max_retries: int | None = None,
         log_samples: bool = False,
+        use_cache: bool = False,
     ) -> EvalRun:
         if not lm_eval_available():
             raise RuntimeError("目前映像缺少 lm-eval，請重新建置 WebUI image。")
@@ -336,6 +347,7 @@ class EvalManager:
                 num_concurrent=num_concurrent,
                 max_retries=max_retries,
                 log_samples=log_samples,
+                use_cache=use_cache,
             )
             self.runs[run.id] = run
             self._persist(run)

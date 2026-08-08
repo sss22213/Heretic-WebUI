@@ -1357,3 +1357,21 @@ def test_ollama_model_list_uses_short_timeout_and_selected_url(monkeypatch):
     assert result == {"models": ["a:latest", "b:latest"]}
     assert captured["base_url"] == "http://10.0.0.5:11434"
     assert captured["timeout"] <= 30
+
+
+def test_eval_use_cache_adds_per_model_cache_prefix(tmp_path: Path):
+    manager = EvalManager(tmp_path / "data", tmp_path / "outputs")
+    run = EvalRun(
+        id="ghi", status="queued", created_at="now",
+        model_source="user/model:latest", model_path="user/model:latest",
+        tasks=["gsm8k"], backend="ollama", base_url="http://ollama:11434",
+        use_cache=True,
+    )
+    command = manager.command(run)
+    cache_prefix = Path(command[command.index("--use_cache") + 1])
+    assert cache_prefix.parent == manager.root / "cache"
+    assert cache_prefix.name == "user-model-latest"
+    assert cache_prefix.parent.is_dir()
+
+    run.use_cache = False
+    assert "--use_cache" not in manager.command(run)

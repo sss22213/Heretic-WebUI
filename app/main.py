@@ -204,6 +204,7 @@ class EvalRequest(BaseModel):
     num_concurrent: int | None = Field(default=None, ge=1, le=64)
     max_retries: int | None = Field(default=None, ge=1, le=10)
     log_samples: bool = False
+    use_cache: bool = False
 
 
 class UISettingsRequest(BaseModel):
@@ -870,7 +871,7 @@ def create_eval(request: EvalRequest):
                 backend=request.backend, base_url=request.base_url,
                 max_gen_toks=request.max_gen_toks,
                 num_concurrent=request.num_concurrent, max_retries=request.max_retries,
-                log_samples=request.log_samples,
+                log_samples=request.log_samples, use_cache=request.use_cache,
             )
         )
     except ValueError as exc:

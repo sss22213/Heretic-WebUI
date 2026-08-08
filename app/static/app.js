@@ -319,6 +319,7 @@ function renderEvalRuns() {
       run.limit ? `每任務 ${run.limit} 題` : '全部題目',
       run.max_gen_toks ? `生成上限 ${run.max_gen_toks} tokens` : null,
       run.num_concurrent ? `並行 ${run.num_concurrent}` : null,
+      run.use_cache ? '續跑快取' : null,
       run.backend === 'ollama' ? 'GGUF（Ollama）' : (run.quantization === 'bnb_4bit' ? '4-bit' : 'BF16'),
     ].filter(Boolean).join(' · ');
     const metrics = Object.entries(run.results || {}).map(([task, values]) => `
@@ -681,6 +682,7 @@ $('#evalForm').addEventListener('submit', async (event) => {
     quantization: form.elements.quantization.value,
     backend,
     log_samples: form.elements.log_samples.checked,
+    use_cache: form.elements.use_cache.checked,
   };
   if (form.elements.max_gen_toks.value !== '') payload.max_gen_toks = Number(form.elements.max_gen_toks.value);
   if (backend === 'ollama') {

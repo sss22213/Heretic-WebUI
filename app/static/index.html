@@ -244,6 +244,7 @@
               <label class="field" id="evalConcurrencyField" hidden><span>並行請求數</span><input type="number" name="num_concurrent" id="evalNumConcurrent" min="1" max="64" placeholder="預設 1"><small>Ollama 端需設 OLLAMA_NUM_PARALLEL ≥ 此值，否則多出的請求只會排隊。</small></label>
               <label class="field" id="evalRetriesField" hidden><span>API 重試次數</span><input type="number" name="max_retries" id="evalMaxRetries" min="1" max="10" placeholder="預設 3"><small>單一請求失敗時的重試上限。</small></label>
               <label class="toggle-field"><input type="checkbox" name="log_samples"><span class="toggle"></span><span><strong>保存每題輸出</strong><small>寫入 results 目錄，方便檢查模型實際回答。</small></span></label>
+              <label class="toggle-field"><input type="checkbox" name="use_cache"><span class="toggle"></span><span><strong>續跑快取</strong><small>逐題快取已完成的回答；中斷後以相同模型與設定重跑會自動接續，不重答已完成的題目。</small></span></label>
             </div>
             <div class="notice" id="evalNotice">評測與 Heretic 任務共用 GPU，同一時間只能執行一項。4-bit 量化模型的分數會與 BF16 略有差異，比較時請使用相同設定。</div>
           </section>
@@ -273,6 +274,6 @@
   </div>
   <div class="toast" id="toast" role="status"></div>
   <script src="/static/i18n.js?v=20260802-1"></script>
-  <script src="/static/app.js?v=20260808-3"></script>
+  <script src="/static/app.js?v=20260808-4"></script>
 </body>
 </html>
