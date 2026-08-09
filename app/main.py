@@ -31,7 +31,7 @@ from .eval_manager import (
 )
 from .heretic_version import HereticVersionManager
 from .lora_manager import LoRAManager, adapter_supported_by_ollama, suggest_merge_base
-from .ollama_import import OllamaClient, OllamaImportManager
+from .ollama_import import OllamaClient, OllamaImportManager, ollama_model_name_error
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = ROOT / "app" / "static"
@@ -143,6 +143,14 @@ class OllamaImportRequest(BaseModel):
             raise ValueError("Ollama API 位址必須以 http:// 或 https:// 開頭")
         return value
 
+    @field_validator("model_name")
+    @classmethod
+    def validate_model_name(cls, value: str) -> str:
+        error = ollama_model_name_error(value)
+        if error:
+            raise ValueError(error)
+        return value
+
 
 class LoRADownloadRequest(BaseModel):
     repo_id: str = Field(min_length=3, max_length=300)
@@ -180,6 +188,14 @@ class LoRAImportRequest(BaseModel):
         pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._/-]*(?::[a-zA-Z0-9._-]+)?$",
     )
     base_url: str = Field(min_length=8, max_length=500)
+
+    @field_validator("model_name")
+    @classmethod
+    def validate_model_name(cls, value: str) -> str:
+        error = ollama_model_name_error(value)
+        if error:
+            raise ValueError(error)
+        return value
 
     @field_validator("base_url")
     @classmethod

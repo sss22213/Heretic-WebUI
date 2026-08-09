@@ -35,6 +35,7 @@ from app.ollama_import import (
     model_architectures,
     normalize_extra_special_tokens,
     ollama_compatibility_error,
+    ollama_model_name_error,
     parse_modelfile,
     resolve_import_format,
 )
@@ -153,6 +154,27 @@ def test_ollama_import_rejects_unsupported_quantization_level():
             model_name="example:latest",
             base_url="http://ollama:11434",
             quantize="q5_K_M",
+        )
+
+
+def test_ollama_model_name_component_limits():
+    assert ollama_model_name_error("user/model:Q4_K_M") is None
+    assert ollama_model_name_error("a" * 80) is None
+    assert ollama_model_name_error(f"user/{'a' * 80}:tag") is None
+    # 87-char model component: rejected by a live Ollama server after the
+    # whole GGUF upload; must be caught at request time instead.
+    long_name = "qwen3.6-27b-qwen3.6-finetune-qwen3.8-max-glm5.2-kimi-k3-distillation-a56-1168cb-heretic"
+    assert "80" in ollama_model_name_error(f"n0404n0404/{long_name}:Q4_K_M")
+    assert "80" in ollama_model_name_error("a" * 81)
+    assert "80" in ollama_model_name_error(f"model:{'t' * 81}")
+    assert ollama_model_name_error("a//b") is not None
+    assert ollama_model_name_error("h/n/m/extra") is not None
+
+    with pytest.raises(ValidationError, match="80"):
+        OllamaImportRequest(
+            output_name="example",
+            model_name=f"n0404n0404/{long_name}:Q4_K_M",
+            base_url="http://ollama:11434",
         )
 
 

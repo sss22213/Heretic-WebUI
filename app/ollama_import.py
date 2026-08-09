@@ -98,6 +98,33 @@ def ollama_compatibility_error(version: str, architectures: list[str]) -> str | 
     return None
 
 
+# Ollama rejects a name whose namespace, model or tag component exceeds
+# 80 characters (types/model/name.go isValidLen; confirmed against a live
+# server: 80 passes, 81 returns "invalid model name").
+OLLAMA_NAME_COMPONENT_LIMIT = 80
+
+
+def ollama_model_name_error(name: str) -> str | None:
+    """Reject names Ollama would refuse, before any conversion or upload.
+
+    /api/create only runs after the multi-GB blob upload, so a bad name
+    discovered there wastes the whole transfer.
+    """
+    body, _, tag = name.partition(":")
+    components = body.split("/") + ([tag] if tag else [])
+    if len(body.split("/")) > 3:
+        return "Ollama 名稱最多只能有三段（registry/namespace/模型名）"
+    for component in components:
+        if not component:
+            return "Ollama 名稱不可包含空白的段（連續的 / 或 :）"
+        if len(component) > OLLAMA_NAME_COMPONENT_LIMIT:
+            return (
+                f"Ollama 名稱的每一段（namespace、模型名、tag）最長 {OLLAMA_NAME_COMPONENT_LIMIT} 字元："
+                f"「{component}」有 {len(component)} 字元，請縮短 {len(component) - OLLAMA_NAME_COMPONENT_LIMIT} 字元以上"
+            )
+    return None
+
+
 def resolve_import_format(requested: str, architectures: list[str]) -> str:
     if requested not in ("auto", "safetensors", "gguf"):
         raise ValueError("匯入格式必須是 auto、safetensors 或 gguf")

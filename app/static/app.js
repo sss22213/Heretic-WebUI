@@ -549,14 +549,14 @@ $('#deleteModal').addEventListener('click', (event) => { if (event.target.id ===
 document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !$('#deleteModal').hidden) closeDeleteModal(); });
 $('#ollamaOutput').addEventListener('change', (event) => {
   const output = state.outputs.find((entry) => entry.name === event.target.value);
-  if (event.target.value && !$('#ollamaModelName').value) $('#ollamaModelName').value = event.target.value.toLowerCase().replace(/[^a-z0-9._/-]+/g, '-').replace(/^-+|-+$/g, '');
+  if (event.target.value && !$('#ollamaModelName').value) $('#ollamaModelName').value = event.target.value.toLowerCase().replace(/[^a-z0-9._/-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
   $('#ollamaFormatHelp').textContent = output?.recommended_format === 'gguf' ? t('autoGgufHelp') : t('autoSafeHelp');
 });
 $('#loraSelect').addEventListener('change', (event) => {
   const item = state.loras.find((entry) => entry.name === event.target.value);
   if (item?.base_model) $('#loraBaseModel').value = item.base_model;
   $('#loraBaseHelp').textContent = item?.base_model ? `Adapter metadata 建議：${item.base_model}` : '請填寫 Ollama 內已有、且與訓練相同的基底模型。';
-  if (item && !$('#loraModelName').value) $('#loraModelName').value = item.name.toLowerCase().replace(/[^a-z0-9._/-]+/g, '-');
+  if (item && !$('#loraModelName').value) $('#loraModelName').value = item.name.toLowerCase().replace(/[^a-z0-9._/-]+/g, '-').slice(0, 80);
 });
 $('#jobForm').elements.quantization.addEventListener('change', (event) => { $('#quantNotice').hidden = event.target.value !== 'bnb_4bit'; });
 $('#jobForm').addEventListener('submit', async (event) => {
