@@ -4,7 +4,7 @@ const state = {
   loraTaskSignature: null, hereticVersion: null,
   evalRuns: [], evalPresets: [], evalPresetsOllama: [], evalSignature: null, ollamaModels: [],
 };
-const EVAL_NOTICE_DEFAULT = '評測與 Heretic 任務共用 GPU，同一時間只能執行一項。4-bit 量化模型的分數會與 BF16 略有差異，比較時請使用相同設定。';
+const EVAL_NOTICE_DEFAULT = '評測與 Heretic 任務共用 GPU，同一時間只能執行一項；若評測的 Ollama 位址指向遠端主機，則不佔本機 GPU，可與 Heretic 任務並行。4-bit 量化模型的分數會與 BF16 略有差異，比較時請使用相同設定。';
 const EVAL_NOTICE_OLLAMA = 'GGUF 模式透過 Ollama 的 OpenAI 相容 API 評測，只支援生成式任務（如 gsm8k）；hellaswag、mmlu 等選擇題任務需要 logprobs，Ollama API 不提供，請改用 Safetensors 後端。';
 const $ = (selector) => document.querySelector(selector);
 let lastToastMessage = null;

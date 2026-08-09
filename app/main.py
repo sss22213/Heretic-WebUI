@@ -26,6 +26,7 @@ from .eval_manager import (
     PRESET_TASKS_OLLAMA,
     EvalManager,
     lm_eval_available,
+    ollama_url_is_local,
     parse_task_list,
 )
 from .heretic_version import HereticVersionManager
@@ -860,7 +861,12 @@ def list_evals():
 
 @app.post("/api/evals", status_code=202)
 def create_eval(request: EvalRequest):
-    if any(job.status in ("queued", "running") for job in manager.list()):
+    # A remote-Ollama eval does its inference elsewhere, so it may run
+    # alongside a Heretic job; anything hitting the local GPU may not.
+    request_needs_local_gpu = request.backend != "ollama" or ollama_url_is_local(request.base_url)
+    if request_needs_local_gpu and any(
+        job.status in ("queued", "running") for job in manager.list()
+    ):
         raise HTTPException(status_code=409, detail="Heretic 任務執行中，GPU 使用中，請稍後再試")
     try:
         tasks = parse_task_list(request.tasks)
@@ -930,7 +936,8 @@ def list_jobs():
 
 @app.post("/api/jobs", status_code=202)
 def create_job(request: JobRequest):
-    if eval_manager.active() is not None:
+    active_eval = eval_manager.active()
+    if active_eval is not None and active_eval.uses_local_gpu():
         raise HTTPException(status_code=409, detail="評測執行中，GPU 使用中，請稍後再試")
     try:
         return asdict(manager.create(request))
@@ -968,7 +975,8 @@ async def cancel_job(job_id: str):
 
 @app.post("/api/jobs/{job_id}/retry", status_code=202)
 def retry_job(job_id: str):
-    if eval_manager.active() is not None:
+    active_eval = eval_manager.active()
+    if active_eval is not None and active_eval.uses_local_gpu():
         raise HTTPException(status_code=409, detail="評測執行中，GPU 使用中，請稍後再試")
     try:
         return asdict(manager.retry(job_id))

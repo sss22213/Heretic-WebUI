@@ -50,6 +50,7 @@ from app.lora_merge import auxiliary_files, model_class_name
 from app.eval_manager import (
     EvalManager,
     EvalRun,
+    ollama_url_is_local,
     parse_task_list,
     summarize_results,
 )
@@ -1375,3 +1376,30 @@ def test_eval_use_cache_adds_per_model_cache_prefix(tmp_path: Path):
 
     run.use_cache = False
     assert "--use_cache" not in manager.command(run)
+
+
+def test_eval_uses_local_gpu_only_for_hf_or_local_ollama():
+    def run(backend, base_url=None):
+        return EvalRun(
+            id="x", status="running", created_at="now",
+            model_source="m", model_path="m",
+            tasks=["gsm8k"], backend=backend, base_url=base_url,
+        )
+
+    assert run("hf").uses_local_gpu()
+    for local in (
+        "http://localhost:11434",
+        "http://127.0.0.1:11434",
+        "http://[::1]:11434",
+        "http://host.docker.internal:11434",
+    ):
+        assert run("ollama", local).uses_local_gpu(), local
+    for remote in (
+        "https://abc123-11434.proxy.runpod.net",
+        "http://192.168.1.50:11434",
+        "http://ollama:11434",
+    ):
+        assert not run("ollama", remote).uses_local_gpu(), remote
+    # Unparsable/empty addresses fall back to the safe assumption: local.
+    assert ollama_url_is_local(None)
+    assert ollama_url_is_local("not a url")

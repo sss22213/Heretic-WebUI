@@ -16,6 +16,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .ollama_import import OllamaClient, complete_safetensors_directory
 
@@ -51,6 +52,21 @@ PRESET_TASKS_OLLAMA = [
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+# Hostnames that resolve to the machine running this WebUI. The container
+# cannot enumerate the docker host's LAN addresses, so a LAN IP pointing back
+# at this host counts as remote — accepted trade-off for allowing evals
+# against genuinely remote servers (e.g. RunPod) to run alongside GPU jobs.
+LOCAL_HOSTNAMES = {"localhost", "0.0.0.0", "::1", "host.docker.internal"}
+
+
+def ollama_url_is_local(base_url: str | None) -> bool:
+    """Whether an Ollama API address points at this machine's own GPU."""
+    host = (urlsplit(base_url or "").hostname or "").lower()
+    if not host:
+        return True
+    return host in LOCAL_HOSTNAMES or host.startswith("127.")
 
 
 def lm_eval_available() -> bool:
@@ -127,6 +143,14 @@ class EvalRun:
     finished_at: str | None = None
     error: str | None = None
     results: dict = field(default_factory=dict)
+
+    def uses_local_gpu(self) -> bool:
+        """Whether this run occupies this machine's GPU.
+
+        The hf backend loads the model in-process; the ollama backend only
+        touches the local GPU when its API address points at this machine.
+        """
+        return self.backend != "ollama" or ollama_url_is_local(self.base_url)
 
 
 class EvalManager:
