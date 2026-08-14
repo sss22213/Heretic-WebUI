@@ -479,7 +479,7 @@ async function refreshOllamaImport() {
     $('#ollamaStatus').textContent = statusLabel(item.status);
     $('#ollamaImportTitle').textContent = `${item.output_name} → ${item.model_name}`;
     const percent = item.bytes_total ? Math.min(100, Math.round(item.bytes_completed * 100 / item.bytes_total)) : 0;
-    const phase = t({ queued: 'statusQueued', converting_bf16: 'phaseConverting', quantizing: 'phaseQuantizing', uploading: 'phaseUploading', creating: 'phaseCreating', completed: 'statusCompleted', failed: 'statusFailed' }[item.phase] || 'phasePreparing');
+    const phase = t({ queued: 'statusQueued', downloading: 'phaseDownloading', converting_bf16: 'phaseConverting', quantizing: 'phaseQuantizing', uploading: 'phaseUploading', creating: 'phaseCreating', completed: 'statusCompleted', failed: 'statusFailed' }[item.phase] || 'phasePreparing');
     $('#ollamaProgress').textContent = item.bytes_total ? `${phase} · ${percent}% · ${formatBytes(item.bytes_completed)} / ${formatBytes(item.bytes_total)}` : phase;
     $('#ollamaProgressBar').style.width = `${percent}%`;
     const consoleElement = $('#ollamaConsole');
@@ -552,6 +552,21 @@ $('#ollamaOutput').addEventListener('change', (event) => {
   if (event.target.value && !$('#ollamaModelName').value) $('#ollamaModelName').value = event.target.value.toLowerCase().replace(/[^a-z0-9._/-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
   $('#ollamaFormatHelp').textContent = output?.recommended_format === 'gguf' ? t('autoGgufHelp') : t('autoSafeHelp');
 });
+$('#ollamaSourceMode').addEventListener('change', (event) => {
+  const hf = event.target.value === 'hf';
+  $('#ollamaOutput').closest('label').hidden = hf;
+  $('#ollamaOutput').disabled = hf;
+  $('#ollamaOutput').required = !hf;
+  $('#ollamaRepoField').hidden = !hf;
+  $('#ollamaRevisionField').hidden = !hf;
+  $('#ollamaRepoId').disabled = !hf;
+  $('#ollamaRepoId').required = hf;
+  $('#ollamaRevision').disabled = !hf;
+});
+$('#ollamaRepoId').addEventListener('change', (event) => {
+  const repo = event.target.value.trim();
+  if (repo && !$('#ollamaModelName').value) $('#ollamaModelName').value = (repo.split('/').pop() || '').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
+});
 $('#loraSelect').addEventListener('change', (event) => {
   const item = state.loras.find((entry) => entry.name === event.target.value);
   if (item?.base_model) $('#loraBaseModel').value = item.base_model;
@@ -583,8 +598,10 @@ $('#ollamaForm').addEventListener('submit', async (event) => {
   const values = Object.fromEntries(new FormData(event.target));
   if (!values.quantize) values.quantize = null;
   values.keep_intermediate = event.target.elements.keep_intermediate.checked;
+  const hfMode = $('#ollamaSourceMode').value === 'hf';
+  if (hfMode && !values.revision) values.revision = 'main';
   try {
-    await api('/api/ollama/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) });
+    await api(hfMode ? '/api/ollama/import/hf' : '/api/ollama/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) });
     $('#ollamaImportPanel').hidden = false; await refreshOllamaImport(); toast(t('importStarted'));
   } catch (error) { toast(error.message); button.disabled = false; button.textContent = t('startImport'); }
 });

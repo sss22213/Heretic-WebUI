@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import http.client
 import json
@@ -18,6 +19,8 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote, urlsplit
+
+from huggingface_hub import HfApi, snapshot_download
 
 
 LLAMA_CPP_DIR = Path(os.getenv("LLAMA_CPP_DIR", "/opt/llama.cpp"))
@@ -319,6 +322,8 @@ class OllamaImport:
     keep_intermediate: bool = False
     phase: str = "queued"
     artifact_path: str | None = None
+    repo_id: str | None = None
+    revision: str | None = None
 
 
 class OllamaClient:
@@ -432,6 +437,13 @@ class OllamaClient:
 
 
 class OllamaImportManager:
+    # Weight formats the GGUF pipeline cannot use; skipping them can save
+    # tens of GB on repos that ship pytorch/gguf duplicates of the weights.
+    HF_IGNORE_PATTERNS = (
+        "*.bin", "*.pt", "*.pth", "*.gguf", "*.onnx", "*.msgpack", "*.h5",
+        "original/*", "consolidated*",
+    )
+
     def __init__(self, output_dir: Path, data_dir: Path) -> None:
         self.output_dir = output_dir
         self.data_dir = data_dir / "ollama_imports"
@@ -582,6 +594,125 @@ class OllamaImportManager:
             self._persist(item)
             threading.Thread(target=self._run, args=(item.id,), daemon=True).start()
             return item
+
+    def start_from_hf(
+        self,
+        repo_id: str,
+        revision: str,
+        model_name: str,
+        base_url: str,
+        quantize: str | None,
+        modelfile: str,
+        import_format: str = "auto",
+        keep_intermediate: bool = False,
+        hf_token: str | None = None,
+    ) -> OllamaImport:
+        repo_id = repo_id.strip()
+        if not re.fullmatch(r"[\w.-]+/[\w.-]+", repo_id):
+            raise ValueError("Hugging Face repo ID 格式應為 organization/repository")
+        revision = (revision or "main").strip() or "main"
+        with self.lock:
+            if self.current and self.current.status in ("queued", "running"):
+                raise RuntimeError("已有 Ollama 匯入任務正在執行")
+            parse_modelfile(modelfile)
+            resolve_import_format(import_format, [])
+            output_name = repo_id.replace("/", "--")
+            directory = self.output_dir / output_name
+            if directory.exists() and not complete_safetensors_directory(directory):
+                raise RuntimeError(
+                    f"outputs/{output_name} 已存在但不完整，請先在模型清單刪除它再重新下載"
+                )
+            item = OllamaImport(
+                id=uuid.uuid4().hex[:12],
+                status="queued",
+                output_name=output_name,
+                model_name=model_name,
+                base_url=base_url.rstrip("/"),
+                quantize=quantize,
+                created_at=utc_now(),
+                modelfile=modelfile,
+                import_format=import_format,
+                # Placeholder until the download reveals the architectures.
+                resolved_format="safetensors",
+                keep_intermediate=keep_intermediate,
+                repo_id=repo_id,
+                revision=revision,
+            )
+            self.current = item
+            self._persist(item)
+            threading.Thread(target=self._run, args=(item.id, hf_token), daemon=True).start()
+            return item
+
+    def _ensure_download(self, item: OllamaImport, directory: Path, hf_token: str | None) -> None:
+        if complete_safetensors_directory(directory):
+            self._log(item, f"沿用既有下載：{directory.name}")
+            return
+        self._set_phase(item, "downloading")
+        ignore = list(self.HF_IGNORE_PATTERNS)
+        try:
+            info = HfApi().model_info(
+                item.repo_id, revision=item.revision, token=hf_token, files_metadata=True
+            )
+            total = sum(
+                sibling.size or 0
+                for sibling in info.siblings or []
+                if not any(fnmatch.fnmatch(sibling.rfilename, pattern) for pattern in ignore)
+            )
+            with self.lock:
+                item.bytes_total = total
+                item.bytes_completed = 0
+                self._persist(item)
+        except Exception:  # noqa: BLE001 - the total is cosmetic; snapshot_download reports real errors
+            pass
+
+        # Staging keyed by output name (not import id) so a failed download
+        # resumes from the partial files on retry.
+        staging = self.output_dir / f".download-{item.output_name}"
+        self._log(item, f"從 Hugging Face 下載：{item.repo_id}@{item.revision}")
+
+        def directory_size(root: Path) -> int:
+            total = 0
+            for path in root.rglob("*"):
+                try:
+                    if path.is_file():
+                        total += path.stat().st_size
+                except OSError:
+                    continue
+            return total
+
+        stop = threading.Event()
+
+        def monitor() -> None:
+            while not stop.wait(3):
+                done = directory_size(staging)
+                with self.lock:
+                    item.bytes_completed = min(done, item.bytes_total) if item.bytes_total else done
+                    self._persist(item)
+
+        thread = threading.Thread(target=monitor, daemon=True)
+        thread.start()
+        try:
+            snapshot_download(
+                repo_id=item.repo_id,
+                revision=item.revision,
+                token=hf_token,
+                local_dir=staging,
+                ignore_patterns=ignore,
+            )
+        finally:
+            stop.set()
+            thread.join()
+        if not complete_safetensors_directory(staging):
+            raise RuntimeError(
+                "下載完成但缺少完整的 Safetensors 權重——"
+                "此 repo 可能不是 safetensors 格式的模型（GGUF/pytorch-only repo 不支援）"
+            )
+        shutil.rmtree(staging / ".cache", ignore_errors=True)
+        staging.replace(directory)
+        with self.lock:
+            item.bytes_completed = item.bytes_total
+            self._persist(item)
+        self._log(item, f"下載完成：outputs/{directory.name}")
 
     def _set_phase(self, item: OllamaImport, phase: str) -> None:
         with self.lock:
@@ -782,7 +913,7 @@ class OllamaImportManager:
             result["log"] = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
             return result
 
-    def _run(self, import_id: str) -> None:
+    def _run(self, import_id: str, hf_token: str | None = None) -> None:
         with self.lock:
             item = self.current
             if item is None or item.id != import_id:
@@ -793,6 +924,18 @@ class OllamaImportManager:
 
         directory = self.output_dir / item.output_name
         try:
+            if item.repo_id:
+                self._ensure_download(item, directory, hf_token)
+                with self.lock:
+                    item.resolved_format = resolve_import_format(
+                        item.import_format, model_architectures(directory)
+                    )
+                    if item.resolved_format == "safetensors":
+                        item.bytes_total = sum(
+                            path.stat().st_size for path in importable_files(directory)
+                        )
+                        item.bytes_completed = 0
+                    self._persist(item)
             client = OllamaClient(item.base_url)
             version = client.version().get("version", "未知")
             self._log(item, f"已連線至 Ollama {version}：{item.base_url}")

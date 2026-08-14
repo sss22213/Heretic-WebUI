@@ -15,6 +15,7 @@ from app.main import (
     Job,
     JobManager,
     JobRequest,
+    OllamaHFImportRequest,
     OllamaImportRequest,
     SettingsStore,
     UISettingsRequest,
@@ -176,6 +177,102 @@ def test_ollama_model_name_component_limits():
             model_name=f"n0404n0404/{long_name}:Q4_K_M",
             base_url="http://ollama:11434",
         )
+
+
+def test_ollama_hf_import_request_validation():
+    request = OllamaHFImportRequest(
+        repo_id="Qwen/Qwen3.6-4B", model_name="qwen3.6-4b:latest", base_url="http://ollama:11434"
+    )
+    assert request.revision == "main"
+    assert request.import_format == "auto"
+    with pytest.raises(ValidationError):
+        OllamaHFImportRequest(
+            repo_id="no-slash", model_name="m:latest", base_url="http://ollama:11434"
+        )
+    # Inherits the shared model-name component limit.
+    with pytest.raises(ValidationError, match="80"):
+        OllamaHFImportRequest(
+            repo_id="a/b", model_name="x" * 81, base_url="http://ollama:11434"
+        )
+
+
+def test_ollama_hf_import_start_validation(tmp_path: Path):
+    manager = OllamaImportManager(tmp_path / "outputs", tmp_path / "data")
+    with pytest.raises(ValueError, match="repo ID"):
+        manager.start_from_hf("not-a-repo", "main", "m:latest", "http://ollama:11434", None, "FROM .")
+
+    incomplete = tmp_path / "outputs" / "org--model"
+    incomplete.mkdir(parents=True)
+    (incomplete / "junk.txt").write_text("x")
+    with pytest.raises(RuntimeError, match="不完整"):
+        manager.start_from_hf("org/model", "main", "m:latest", "http://ollama:11434", None, "FROM .")
+
+    manager.current = OllamaImport(
+        id="busy", status="running", output_name="other", model_name="m:latest",
+        base_url="http://ollama:11434", quantize=None, created_at="now",
+    )
+    with pytest.raises(RuntimeError, match="已有"):
+        manager.start_from_hf("org/other", "main", "m:latest", "http://ollama:11434", None, "FROM .")
+
+
+def test_ollama_hf_import_downloads_then_imports(tmp_path: Path, monkeypatch):
+    output_root = tmp_path / "outputs"
+    calls = {}
+
+    def fake_snapshot_download(*, repo_id, revision, token, local_dir, ignore_patterns):
+        calls.update(repo_id=repo_id, revision=revision, token=token,
+                     ignore_patterns=list(ignore_patterns))
+        staging = Path(local_dir)
+        staging.mkdir(parents=True, exist_ok=True)
+        (staging / "config.json").write_text("{}")
+        (staging / "model.safetensors").write_bytes(b"weights")
+        cache = staging / ".cache" / "huggingface"
+        cache.mkdir(parents=True)
+        (cache / "download.lock").write_text("")
+
+    class FakeApi:
+        def model_info(self, *args, **kwargs):
+            raise RuntimeError("offline: progress total is optional")
+
+    class FakeClient:
+        def __init__(self, base_url):
+            calls["base_url"] = base_url
+
+        def version(self):
+            return {"version": "0.30.6"}
+
+        def blob_exists(self, _digest):
+            return True
+
+        def create(self, model_name, files, quantize, options):
+            calls.update(model_name=model_name, files=dict(files), quantize=quantize)
+            return {"status": "success"}
+
+    monkeypatch.setattr("app.ollama_import.snapshot_download", fake_snapshot_download)
+    monkeypatch.setattr("app.ollama_import.HfApi", FakeApi)
+    monkeypatch.setattr("app.ollama_import.OllamaClient", FakeClient)
+    manager = OllamaImportManager(output_root, tmp_path / "data")
+    item = OllamaImport(
+        id="hf-test", status="queued", output_name="org--model",
+        model_name="model:latest", base_url="http://ollama:11434",
+        quantize=None, created_at="2026-01-01T00:00:00+00:00", modelfile="FROM .",
+        repo_id="org/model", revision="main",
+    )
+    manager.current = item
+    manager._persist(item)
+
+    manager._run(item.id, "hf_secret")
+
+    assert item.status == "completed", item.error
+    assert calls["repo_id"] == "org/model"
+    assert calls["token"] == "hf_secret"
+    assert "*.bin" in calls["ignore_patterns"] and "*.gguf" in calls["ignore_patterns"]
+    directory = output_root / "org--model"
+    assert (directory / "model.safetensors").is_file()
+    assert not (directory / ".cache").exists()
+    assert not (output_root / ".download-org--model").exists()
+    assert sorted(calls["files"]) == ["config.json", "model.safetensors"]
+    assert item.resolved_format == "safetensors"
 
 
 def test_output_artifacts_require_every_indexed_shard(tmp_path: Path):

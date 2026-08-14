@@ -122,8 +122,7 @@ class JobRequest(BaseModel):
         return value
 
 
-class OllamaImportRequest(BaseModel):
-    output_name: str = Field(min_length=1, max_length=160, pattern=r"^[a-zA-Z0-9._-]+$")
+class OllamaImportOptions(BaseModel):
     model_name: str = Field(
         min_length=1,
         max_length=200,
@@ -150,6 +149,15 @@ class OllamaImportRequest(BaseModel):
         if error:
             raise ValueError(error)
         return value
+
+
+class OllamaImportRequest(OllamaImportOptions):
+    output_name: str = Field(min_length=1, max_length=160, pattern=r"^[a-zA-Z0-9._-]+$")
+
+
+class OllamaHFImportRequest(OllamaImportOptions):
+    repo_id: str = Field(min_length=3, max_length=200, pattern=r"^[\w.-]+/[\w.-]+$")
+    revision: str = Field(default="main", min_length=1, max_length=200)
 
 
 class LoRADownloadRequest(BaseModel):
@@ -776,6 +784,28 @@ def create_ollama_import(request: OllamaImportRequest):
                 request.modelfile,
                 request.import_format,
                 request.keep_intermediate,
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/ollama/import/hf", status_code=202)
+def create_ollama_hf_import(request: OllamaHFImportRequest):
+    try:
+        return asdict(
+            ollama_manager.start_from_hf(
+                request.repo_id,
+                request.revision,
+                request.model_name,
+                request.base_url,
+                request.quantize,
+                request.modelfile,
+                request.import_format,
+                request.keep_intermediate,
+                hf_token_store.get(),
             )
         )
     except ValueError as exc:
