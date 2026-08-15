@@ -28,6 +28,7 @@ class HereticVersionManager:
         slots_dir: Path | None = None,
         upstream_url: str = "https://github.com/p-e-w/heretic.git",
         initial_ref: str | None = None,
+        branch: str | None = None,
     ) -> None:
         self.source_dir = source_dir.resolve()
         self.state_file = state_file
@@ -35,7 +36,7 @@ class HereticVersionManager:
         self.slots_dir = (slots_dir or state_file.parent / "heretic_slots").resolve()
         self.lock = threading.RLock()
         self.remote = os.getenv("HERETIC_UPDATE_REMOTE", "origin")
-        self.branch = os.getenv("HERETIC_UPDATE_BRANCH", "master")
+        self.branch = branch or os.getenv("HERETIC_UPDATE_BRANCH", "master")
         self.upstream_url = upstream_url
         self.initial_ref = initial_ref
 

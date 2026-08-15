@@ -1,0 +1,165 @@
+diff --git a/src/heretic/config.py b/src/heretic/config.py
+index b5bdb6b..080cd2c 100644
+--- a/src/heretic/config.py
++++ b/src/heretic/config.py
+@@ -278,6 +278,48 @@ class Settings(BaseSettings):
+         description="Directory to save and load study progress to/from.",
+     )
+ 
++    max_shard_size: str = Field(
++        default="5GB",
++        description="Maximum size for individual safetensors files generated when exporting a model.",
++    )
++
++    export_strategy: str | None = Field(
++        default=None,
++        description=(
++            'Predefined export strategy ("merge" or "adapter"). '
++            "When set, the interactive merge question is skipped."
++        ),
++    )
++
++    checkpoint_action: str | None = Field(
++        default=None,
++        description=(
++            'Predefined action to take when an existing checkpoint is found ("continue" or "restart"). '
++            "When set, the interactive question is skipped."
++        ),
++    )
++
++    trial_index: int | None = Field(
++        default=None,
++        description=(
++            "Index of the Pareto-optimal trial to select automatically (0 = fewest refusals). "
++            "When set, the interactive trial menu is skipped."
++        ),
++    )
++
++    model_action: str | None = Field(
++        default=None,
++        description=(
++            'Predefined action to perform with the decensored model ("save"). '
++            "When set, the interactive action menu is skipped and the program exits afterwards."
++        ),
++    )
++
++    save_directory: str | None = Field(
++        default=None,
++        description='Directory to save the model to when model_action is "save".',
++    )
++
+     benchmarks: list[BenchmarkSpecification] = Field(
+         default=[
+             BenchmarkSpecification(
+diff --git a/src/heretic/main.py b/src/heretic/main.py
+index b633484..79b3594 100644
+--- a/src/heretic/main.py
++++ b/src/heretic/main.py
+@@ -76,6 +76,9 @@ def obtain_merge_strategy(settings: Settings) -> str | None:
+     Returns "merge", "adapter", or None (if cancelled/invalid).
+     """
+ 
++    if settings.export_strategy is not None:
++        return settings.export_strategy
++
+     if settings.quantization == QuantizationMethod.BNB_4BIT:
+         print()
+         print(
+@@ -320,8 +323,11 @@ def run():
+             )
+         )
+ 
+-        print()
+-        choice = prompt_select("How would you like to proceed?", choices)
++        if settings.checkpoint_action is not None:
++            choice = settings.checkpoint_action
++        else:
++            print()
++            choice = prompt_select("How would you like to proceed?", choices)
+ 
+         if choice == "continue":
+             settings = Settings.model_validate_json(
+@@ -772,8 +778,11 @@ def run():
+         )
+ 
+         while True:
+-            print()
+-            trial = prompt_select("Which trial do you want to use?", choices)
++            if settings.trial_index is not None:
++                trial = best_trials[min(settings.trial_index, len(best_trials) - 1)]
++            else:
++                print()
++                trial = prompt_select("Which trial do you want to use?", choices)
+ 
+             if trial == "continue":
+                 while True:
+@@ -851,17 +860,22 @@ def run():
+                 )
+ 
+             while True:
+-                print()
+-                action = prompt_select(
+-                    "What do you want to do with the decensored model?",
+-                    [
+-                        "Save the model to a local folder",
+-                        "Upload the model to Hugging Face",
+-                        "Chat with the model",
+-                        "Benchmark the model",
+-                        "Return to the trial selection menu",
+-                    ],
+-                )
++                if settings.model_action == "save":
++                    action = "Save the model to a local folder"
++                elif settings.model_action is not None:
++                    action = settings.model_action
++                else:
++                    print()
++                    action = prompt_select(
++                        "What do you want to do with the decensored model?",
++                        [
++                            "Save the model to a local folder",
++                            "Upload the model to Hugging Face",
++                            "Chat with the model",
++                            "Benchmark the model",
++                            "Return to the trial selection menu",
++                        ],
++                    )
+ 
+                 if action is None or action == "Return to the trial selection menu":
+                     break
+@@ -872,7 +886,10 @@ def run():
+                 try:
+                     match action:
+                         case "Save the model to a local folder":
+-                            save_directory = prompt_path("Path to the folder:")
++                            if settings.save_directory is not None:
++                                save_directory = settings.save_directory
++                            else:
++                                save_directory = prompt_path("Path to the folder:")
+                             if not save_directory:
+                                 continue
+ 
+@@ -890,7 +907,10 @@ def run():
+                                 else:
+                                     print("Saving merged model...")
+                                     merged_model = model.get_merged_model()
+-                                merged_model.save_pretrained(save_directory)
++                                merged_model.save_pretrained(
++                                    save_directory,
++                                    max_shard_size=settings.max_shard_size,
++                                )
+                                 del merged_model
+                                 empty_cache()
+                                 model.tokenizer.save_pretrained(save_directory)
+@@ -1148,6 +1168,11 @@ def run():
+                 except Exception as error:
+                     print(f"[red]Error: {error}[/]")
+ 
++                # A predefined action runs exactly once (non-interactive mode);
++                # looping back to the menu would repeat it forever.
++                if settings.model_action is not None:
++                    return
++
+ 
+ def main():
+     # Install Rich traceback handler.

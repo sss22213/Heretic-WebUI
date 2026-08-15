@@ -1,7 +1,7 @@
 const state = {
   jobs: [], selectedId: null, logOffset: 0, outputs: [], loras: [], poller: null,
   locale: localStorage.getItem('heretic-language') || 'zh-TW', pendingDelete: null, importLoaded: false,
-  loraTaskSignature: null, hereticVersion: null,
+  loraTaskSignature: null, hereticVersion: { master: null, ara: null },
   evalRuns: [], evalPresets: [], evalPresetsOllama: [], evalSignature: null, ollamaModels: [],
 };
 const EVAL_NOTICE_DEFAULT = '評測與 Heretic 任務共用 GPU，同一時間只能執行一項；若評測的 Ollama 位址指向遠端主機，則不佔本機 GPU，可與 Heretic 任務並行。4-bit 量化模型的分數會與 BF16 略有差異，比較時請使用相同設定。';
@@ -88,7 +88,9 @@ function showView(name) {
   if (name === 'ollama') { refreshOutputs(); refreshOllamaImport(); }
   if (name === 'lora') { refreshOutputs().then(refreshLoras); refreshLoraTask(); }
   if (name === 'evals') { refreshOutputs().then(refreshEvals); refreshEvalTask(); }
-  if (name === 'versions') refreshHereticVersion(false);
+  if (name === 'versions') { refreshHereticVersion(false, 'master'); refreshHereticVersion(false, 'ara'); }
+  // Opening the ARA page pre-builds the ara slot so the first job doesn't wait.
+  if (name === 'ara') refreshHereticVersion(false, 'ara');
 }
 
 function renderJobs() {
@@ -98,7 +100,7 @@ function renderJobs() {
   list.innerHTML = state.jobs.map((job) => `
     <button class="job-item ${job.id === state.selectedId ? 'active' : ''}" data-id="${escapeHtml(job.id)}">
       <div class="job-item-top"><strong>${escapeHtml(job.request.model)}</strong><span class="status-badge ${job.status}">${escapeHtml(statusLabel(job.status))}</span></div>
-      <small>${formatTime(job.created_at)} · ${job.request.n_trials} trials</small>
+      <small>${formatTime(job.created_at)} · ${job.request.n_trials} trials${job.heretic_channel === 'ara' ? ' · ARA' : ''}</small>
     </button>`).join('');
   list.querySelectorAll('.job-item').forEach((item) => item.addEventListener('click', () => selectJob(item.dataset.id)));
 }
@@ -379,67 +381,74 @@ async function deleteEvalRun(id) {
   } catch (error) { toast(error?.message || error); }
 }
 
-function renderHereticVersion(version) {
-  state.hereticVersion = version;
+const VERSION_UI_SUFFIX = { master: '', ara: 'Ara' };
+
+function renderHereticVersion(version, channel = 'master') {
+  state.hereticVersion[channel] = version;
+  const suffix = VERSION_UI_SUFFIX[channel];
   if (!version?.available) {
-    $('#hereticVersionNotice').textContent = version?.error || 'Heretic 版本管理不可用。';
-    $('#updateVersionButton').disabled = true;
-    $('#rollbackVersionButton').disabled = true;
+    $(`#hereticVersionNotice${suffix}`).textContent = version?.error || 'Heretic 版本管理不可用。';
+    $(`#updateVersionButton${suffix}`).disabled = true;
+    $(`#rollbackVersionButton${suffix}`).disabled = true;
     return;
   }
-  $('#hereticCommit').textContent = version.short_commit;
-  $('#hereticCommit').title = version.commit;
-  $('#hereticSubject').textContent = version.subject;
-  $('#hereticTracking').textContent = `Slot ${version.active_slot} · ${version.remote}/${version.branch}`;
-  $('#hereticCommitTime').textContent = formatTime(version.committed_at);
-  $('#hereticLatest').textContent = version.latest_commit ? version.latest_commit.slice(0, 7) : '尚未檢查';
-  $('#hereticUpdateState').textContent = version.latest_commit ? (version.update_available ? '有新版本可用' : '目前已是最新版') : '按下檢查更新以連線 GitHub';
+  $(`#hereticCommit${suffix}`).textContent = version.short_commit;
+  $(`#hereticCommit${suffix}`).title = version.commit;
+  $(`#hereticSubject${suffix}`).textContent = version.subject;
+  $(`#hereticTracking${suffix}`).textContent = `Slot ${version.active_slot} · ${version.remote}/${version.branch}`;
+  $(`#hereticCommitTime${suffix}`).textContent = formatTime(version.committed_at);
+  $(`#hereticLatest${suffix}`).textContent = version.latest_commit ? version.latest_commit.slice(0, 7) : '尚未檢查';
+  $(`#hereticUpdateState${suffix}`).textContent = version.latest_commit ? (version.update_available ? '有新版本可用' : '目前已是最新版') : '按下檢查更新以連線 GitHub';
   const dirty = Boolean(version.dirty);
-  const dirtyFiles = $('#hereticDirtyFiles');
+  const dirtyFiles = $(`#hereticDirtyFiles${suffix}`);
   dirtyFiles.hidden = !dirty;
   dirtyFiles.textContent = dirty ? `未提交修改：\n${version.dirty_files.join('\n')}` : '';
   if (dirty) {
-    $('#hereticVersionNotice').textContent = '偵測到未提交的本機修改。為避免覆蓋，更新與退回功能已鎖定。';
+    $(`#hereticVersionNotice${suffix}`).textContent = '偵測到未提交的本機修改。為避免覆蓋，更新與退回功能已鎖定。';
   } else if (version.rebuild_required) {
-    $('#hereticVersionNotice').textContent = '依賴檔案曾變更，請重新建置 Docker image 後再執行模型任務。';
+    $(`#hereticVersionNotice${suffix}`).textContent = '依賴檔案曾變更，請重新建置 Docker image 後再執行模型任務。';
   } else if (version.managed_patches_applied) {
-    const patchNames = (version.managed_patches || []).map((item) => item.name).join('、') || 'Gemma 4 compatibility patch';
-    $('#hereticVersionNotice').textContent = `Active Slot ${version.active_slot} 已驗證；managed patch：${patchNames}。`;
+    const patchNames = (version.managed_patches || []).map((item) => item.name).join('、') || 'managed patch';
+    $(`#hereticVersionNotice${suffix}`).textContent = `Active Slot ${version.active_slot} 已驗證；managed patch：${patchNames}。`;
   } else if (version.rollback_available) {
-    $('#hereticVersionNotice').textContent = `可退回更新前版本 ${version.previous_short_commit || version.previous_commit?.slice(0, 7)}。`;
+    $(`#hereticVersionNotice${suffix}`).textContent = `可退回更新前版本 ${version.previous_short_commit || version.previous_commit?.slice(0, 7)}。`;
   } else {
-    $('#hereticVersionNotice').textContent = 'Working tree 乾淨，可以安全檢查或更新版本。';
+    $(`#hereticVersionNotice${suffix}`).textContent = 'Working tree 乾淨，可以安全檢查或更新版本。';
   }
-  $('#updateVersionButton').disabled = dirty || !version.update_available;
-  $('#rollbackVersionButton').disabled = dirty || !version.rollback_available;
+  $(`#updateVersionButton${suffix}`).disabled = dirty || !version.update_available;
+  $(`#rollbackVersionButton${suffix}`).disabled = dirty || !version.rollback_available;
 }
 
-async function refreshHereticVersion(checkRemote = false) {
-  const checkButton = $('#checkVersionButton');
+async function refreshHereticVersion(checkRemote = false, channel = 'master') {
+  const checkButton = $(`#checkVersionButton${VERSION_UI_SUFFIX[channel]}`);
   if (checkRemote) { checkButton.disabled = true; checkButton.textContent = '檢查中...'; }
   try {
-    const version = await api(`/api/heretic/version${checkRemote ? '?check_remote=true' : ''}`);
-    renderHereticVersion(version);
+    const version = await api(`/api/heretic/version?channel=${channel}${checkRemote ? '&check_remote=true' : ''}`);
+    renderHereticVersion(version, channel);
   } catch (error) { toast(error.message); }
   finally { if (checkRemote) { checkButton.disabled = false; checkButton.textContent = '檢查更新'; } }
 }
 
-async function changeHereticVersion(action) {
+async function changeHereticVersion(action, channel = 'master') {
   const isRollback = action === 'rollback';
-  const prompt = isRollback ? '確定退回更新前的 Heretic 版本？' : '確定將 Heretic 更新至官方 master 最新版本？';
+  const branchLabel = channel === 'ara' ? 'ara' : 'master';
+  const prompt = isRollback
+    ? `確定退回更新前的 Heretic ${branchLabel} 版本？`
+    : `確定將 Heretic 更新至官方 ${branchLabel} 最新版本？`;
   if (!window.confirm(prompt)) return;
-  const button = isRollback ? $('#rollbackVersionButton') : $('#updateVersionButton');
+  const suffix = VERSION_UI_SUFFIX[channel];
+  const button = isRollback ? $(`#rollbackVersionButton${suffix}`) : $(`#updateVersionButton${suffix}`);
   button.disabled = true;
   const original = button.textContent;
   button.textContent = isRollback ? '退回中...' : '更新中...';
   try {
     const result = await api(`/api/heretic/version/${action}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ confirmation: isRollback ? 'ROLLBACK' : 'UPDATE' }),
+      body: JSON.stringify({ confirmation: isRollback ? 'ROLLBACK' : 'UPDATE', channel }),
     });
-    renderHereticVersion(result);
+    renderHereticVersion(result, channel);
     toast(result.rebuild_required ? `${result.message}；需要重新建置 image。` : result.message);
-  } catch (error) { toast(error.message); await refreshHereticVersion(false); }
+  } catch (error) { toast(error.message); await refreshHereticVersion(false, channel); }
   finally { button.textContent = original; }
 }
 
@@ -504,7 +513,7 @@ function updateSelected() {
   $('#selectedStatus').className = `status-badge ${job.status}`;
   $('#selectedStatus').textContent = statusLabel(job.status);
   $('#selectedTitle').textContent = job.request.model;
-  const hereticVersion = job.heretic_slot ? `Heretic ${job.heretic_slot}@${(job.heretic_commit || '').slice(0, 7)}` : 'Heretic legacy';
+  const hereticVersion = job.heretic_slot ? `Heretic${job.heretic_channel === 'ara' ? ' ara' : ''} ${job.heretic_slot}@${(job.heretic_commit || '').slice(0, 7)}` : 'Heretic legacy';
   $('#jobMeta').textContent = `${job.id} · ${hereticVersion} · ${job.output_directory}`;
   $('#cancelButton').hidden = !['queued', 'running'].includes(job.status);
   $('#retryButton').hidden = job.status !== 'failed';
@@ -527,8 +536,10 @@ async function pollLog() {
 function formPayload(form) {
   const values = Object.fromEntries(new FormData(form));
   ['n_trials', 'n_startup_trials', 'max_response_length', 'batch_size', 'max_batch_size', 'lora_rank'].forEach((key) => { values[key] = Number(values[key]); });
-  values.offload_outputs_to_cpu = form.elements.offload_outputs_to_cpu.checked;
+  if (form.elements.offload_outputs_to_cpu) values.offload_outputs_to_cpu = form.elements.offload_outputs_to_cpu.checked;
   values.orthogonalize_direction = form.elements.orthogonalize_direction.checked;
+  ['use_ara', 'use_ara_lora', 'use_piqa'].forEach((key) => { if (form.elements[key]) values[key] = form.elements[key].checked; });
+  if (form.elements.ara_lora_rank) values.ara_lora_rank = Number(form.elements.ara_lora_rank.value);
   if (!values.output_name) delete values.output_name;
   if (!values.hf_token) delete values.hf_token;
   if (!values.good_config || !values.good_config.trim()) delete values.good_config;
@@ -538,7 +549,7 @@ function formPayload(form) {
 
 // Auto-detect the configs of an entered HF dataset so multi-config datasets
 // (which Heretic can't load by ID) can be picked from a list and resolved.
-const datasetConfigRequest = { good: 0, bad: 0 };
+const datasetConfigRequest = { good: 0, bad: 0, araGood: 0, araBad: 0 };
 async function detectDatasetConfigs(side) {
   const repo = $(`#${side}Dataset`).value.trim();
   const datalist = $(`#${side}ConfigOptions`);
@@ -562,7 +573,7 @@ async function detectDatasetConfigs(side) {
     datalist.innerHTML = ''; hint.hidden = true;
   }
 }
-['good', 'bad'].forEach((side) => {
+['good', 'bad', 'araGood', 'araBad'].forEach((side) => {
   $(`#${side}Dataset`).addEventListener('change', () => detectDatasetConfigs(side));
 });
 
@@ -571,10 +582,13 @@ $('#languageSelect').addEventListener('change', (event) => setLanguage(event.tar
 $('#refreshButton').addEventListener('click', refreshJobs);
 $('#refreshOutputsButton').addEventListener('click', refreshOutputs);
 $('#refreshLorasButton').addEventListener('click', refreshLoras);
-$('#refreshVersionButton').addEventListener('click', () => refreshHereticVersion(false));
-$('#checkVersionButton').addEventListener('click', () => refreshHereticVersion(true));
-$('#updateVersionButton').addEventListener('click', () => changeHereticVersion('update'));
-$('#rollbackVersionButton').addEventListener('click', () => changeHereticVersion('rollback'));
+$('#refreshVersionButton').addEventListener('click', () => { refreshHereticVersion(false, 'master'); refreshHereticVersion(false, 'ara'); });
+$('#checkVersionButton').addEventListener('click', () => refreshHereticVersion(true, 'master'));
+$('#updateVersionButton').addEventListener('click', () => changeHereticVersion('update', 'master'));
+$('#rollbackVersionButton').addEventListener('click', () => changeHereticVersion('rollback', 'master'));
+$('#checkVersionButtonAra').addEventListener('click', () => refreshHereticVersion(true, 'ara'));
+$('#updateVersionButtonAra').addEventListener('click', () => changeHereticVersion('update', 'ara'));
+$('#rollbackVersionButtonAra').addEventListener('click', () => changeHereticVersion('rollback', 'ara'));
 $('#deleteCancel').addEventListener('click', closeDeleteModal);
 $('#deleteConfirm').addEventListener('click', deletePendingOutput);
 $('#deleteModal').addEventListener('click', (event) => { if (event.target.id === 'deleteModal') closeDeleteModal(); });
@@ -605,16 +619,31 @@ $('#loraSelect').addEventListener('change', (event) => {
   $('#loraBaseHelp').textContent = item?.base_model ? `Adapter metadata 建議：${item.base_model}` : '請填寫 Ollama 內已有、且與訓練相同的基底模型。';
   if (item && !$('#loraModelName').value) $('#loraModelName').value = item.name.toLowerCase().replace(/[^a-z0-9._/-]+/g, '-').slice(0, 80);
 });
-$('#jobForm').elements.quantization.addEventListener('change', (event) => { $('#quantNotice').hidden = event.target.value !== 'bnb_4bit'; });
-$('#jobForm').addEventListener('submit', async (event) => {
-  event.preventDefault(); const button = $('#submitButton'); button.disabled = true; button.textContent = t('creatingJob');
-  try {
-    const job = await api('/api/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formPayload(event.target)) });
-    if (event.target.elements.hf_token.value) { $('#hfTokenHelp').textContent = t('tokenSaved'); event.target.elements.hf_token.placeholder = t('tokenSaved'); }
-    event.target.elements.hf_token.value = ''; state.selectedId = job.id; state.logOffset = 0; showView('jobs'); toast(t('jobCreated'));
-  } catch (error) { toast(error.message); }
-  finally { button.disabled = false; button.textContent = t('startProcessing'); }
-});
+function bindJobForm({ formId, buttonId, quantNoticeId, tokenHelpId }) {
+  const form = $(formId);
+  form.elements.quantization.addEventListener('change', (event) => { $(quantNoticeId).hidden = event.target.value !== 'bnb_4bit'; });
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault(); const button = $(buttonId); button.disabled = true; button.textContent = t('creatingJob');
+    try {
+      const job = await api('/api/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formPayload(form)) });
+      if (form.elements.hf_token.value) { $(tokenHelpId).textContent = t('tokenSaved'); form.elements.hf_token.placeholder = t('tokenSaved'); }
+      form.elements.hf_token.value = ''; state.selectedId = job.id; state.logOffset = 0; showView('jobs'); toast(t('jobCreated'));
+    } catch (error) { toast(error.message); }
+    finally { button.disabled = false; button.textContent = t('startProcessing'); }
+  });
+}
+bindJobForm({ formId: '#jobForm', buttonId: '#submitButton', quantNoticeId: '#quantNotice', tokenHelpId: '#hfTokenHelp' });
+bindJobForm({ formId: '#araJobForm', buttonId: '#araSubmitButton', quantNoticeId: '#araQuantNotice', tokenHelpId: '#araHfTokenHelp' });
+// The ARA LoRA rank only applies while ARA LoRA mode is active, which itself
+// requires ARA to be enabled.
+function syncAraToggles() {
+  const useAra = $('#araUseAra').checked;
+  $('#araUseAraLora').disabled = !useAra;
+  $('#araLoraRank').disabled = !useAra || !$('#araUseAraLora').checked;
+}
+$('#araUseAra').addEventListener('change', syncAraToggles);
+$('#araUseAraLora').addEventListener('change', syncAraToggles);
+syncAraToggles();
 $('#cancelButton').addEventListener('click', async () => {
   if (!state.selectedId || !window.confirm(t('confirmCancel'))) return;
   try { await api(`/api/jobs/${state.selectedId}/cancel`, { method: 'POST' }); await refreshJobs(); toast(t('cancelSent')); }
@@ -769,7 +798,10 @@ async function initialize() {
       $('#evalNotice').textContent = '目前映像缺少 lm-eval，請重新建置 WebUI image（docker compose up --build -d）後再執行評測。';
       const button = $('#evalSubmitButton'); button.disabled = true; button.dataset.unavailable = '1';
     }
-    if (system.hf_token_saved) { $('#hfTokenHelp').textContent = t('tokenSaved'); $('#jobForm').elements.hf_token.placeholder = t('tokenSaved'); }
+    if (system.hf_token_saved) {
+      $('#hfTokenHelp').textContent = t('tokenSaved'); $('#jobForm').elements.hf_token.placeholder = t('tokenSaved');
+      $('#araHfTokenHelp').textContent = t('tokenSaved'); $('#araJobForm').elements.hf_token.placeholder = t('tokenSaved');
+    }
   } catch (_) { $('#healthText').textContent = t('serviceError'); }
   await refreshJobs(); await refreshOutputs(); await refreshLoras(); await refreshOllamaImport(); await refreshLoraTask(); await refreshEvals(); await refreshEvalTask(); await refreshHereticVersion(false);
   state.poller = window.setInterval(async () => { await refreshJobs(); await pollLog(); await refreshOllamaImport(); await refreshLoraTask(); await refreshEvalTask(); }, 2000);

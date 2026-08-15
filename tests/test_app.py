@@ -1676,3 +1676,113 @@ def test_eval_uses_local_gpu_only_for_hf_or_local_ollama():
     # Unparsable/empty addresses fall back to the safe assumption: local.
     assert ollama_url_is_local(None)
     assert ollama_url_is_local("not a url")
+
+
+def test_job_request_ara_channel_and_render_config(tmp_path: Path):
+    request = JobRequest(
+        model="org/model",
+        heretic_channel="ara",
+        use_ara_lora=True,
+        ara_lora_rank=64,
+        use_piqa=True,
+    )
+    parsed = tomllib.loads(render_config(request, tmp_path / "output", "abc123"))
+
+    assert parsed["use_ara"] is True
+    assert parsed["use_ara_lora"] is True
+    assert parsed["ara_lora_rank"] == 64
+    assert parsed["use_piqa"] is True
+    # ara has no offload_outputs_to_cpu setting; emitting it would make its
+    # pydantic Settings reject the config file.
+    assert "offload_outputs_to_cpu" not in parsed
+    # The automation keys exist on ara only via the managed patch and must be
+    # present so the run needs no interactive answers.
+    assert parsed["model_action"] == "save"
+    assert parsed["checkpoint_action"] == "continue"
+    assert parsed["trial_index"] == 0
+    assert parsed["export_strategy"] == "merge"
+    assert parsed["good_prompts"]["dataset"] == "mlabonne/harmless_alpaca"
+
+
+def test_master_channel_config_keeps_offload_and_omits_ara_keys(tmp_path: Path):
+    parsed = tomllib.loads(
+        render_config(JobRequest(model="org/model"), tmp_path / "output", "abc123")
+    )
+    assert parsed["offload_outputs_to_cpu"] is True
+    assert "use_ara" not in parsed
+    assert "ara_lora_rank" not in parsed
+
+
+def test_ara_full_weight_mode_rejects_adapter_export():
+    with pytest.raises(ValidationError):
+        JobRequest(model="org/model", heretic_channel="ara", export_strategy="adapter")
+    ara_lora = JobRequest(
+        model="org/model", heretic_channel="ara",
+        export_strategy="adapter", use_ara_lora=True,
+    )
+    assert ara_lora.export_strategy == "adapter"
+    assert JobRequest(model="org/model", export_strategy="adapter").export_strategy == "adapter"
+
+
+def test_ara_patch_present_and_targets_expected_files():
+    patch = Path(__file__).resolve().parent.parent / "patches" / "heretic-ara" / "0001-webui-automation.patch"
+    text = patch.read_text(encoding="utf-8")
+    assert "a/src/heretic/config.py" in text
+    assert "a/src/heretic/main.py" in text
+    assert "checkpoint_action" in text
+    assert "trial_index" in text
+    assert "save_directory" in text
+    assert "max_shard_size" in text
+
+
+def test_version_manager_tracks_configured_branch(tmp_path: Path):
+    remote = tmp_path / "remote.git"
+    seed = tmp_path / "seed"
+    checkout = tmp_path / "checkout"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    seed.mkdir()
+    _git(seed, "init", "-b", "master")
+    _git(seed, "config", "user.email", "test@example.com")
+    _git(seed, "config", "user.name", "Test")
+    (seed / "pyproject.toml").write_text("version = '1'\n")
+    (seed / "uv.lock").write_text("lock-1\n")
+    (seed / "src" / "heretic").mkdir(parents=True)
+    (seed / "src" / "heretic" / "__init__.py").write_text("")
+    (seed / "src" / "heretic" / "main.py").write_text("")
+    _git(seed, "add", ".")
+    _git(seed, "commit", "-m", "master one")
+    _git(seed, "checkout", "-b", "ara")
+    (seed / "src" / "heretic" / "ara.py").write_text("ARA = 1\n")
+    _git(seed, "add", ".")
+    _git(seed, "commit", "-m", "ara one")
+    ara_first = _git(seed, "rev-parse", "HEAD")
+    _git(seed, "remote", "add", "origin", str(remote))
+    _git(seed, "push", "-u", "origin", "master", "ara")
+    subprocess.run(["git", "clone", str(remote), str(checkout)], check=True, capture_output=True)
+
+    manager = HereticVersionManager(
+        checkout,
+        tmp_path / "state.json",
+        slots_dir=tmp_path / "slots",
+        initial_ref="origin/ara",
+        branch="ara",
+    )
+    status = manager.status()
+    assert status["branch"] == "ara"
+    assert status["commit"] == ara_first
+    assert (Path(manager.runtime_info()["path"]) / "src" / "heretic" / "ara.py").is_file()
+
+    _git(seed, "checkout", "ara")
+    (seed / "src" / "heretic" / "ara.py").write_text("ARA = 2\n")
+    _git(seed, "add", ".")
+    _git(seed, "commit", "-m", "ara two")
+    ara_second = _git(seed, "rev-parse", "HEAD")
+    _git(seed, "push", "origin", "ara")
+
+    checked = manager.status(check_remote=True)
+    assert checked["latest_commit"] == ara_second
+    assert checked["update_available"] is True
+
+    updated = manager.update()
+    assert updated["commit"] == ara_second
+    assert updated["branch"] == "ara"
