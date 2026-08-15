@@ -531,8 +531,40 @@ function formPayload(form) {
   values.orthogonalize_direction = form.elements.orthogonalize_direction.checked;
   if (!values.output_name) delete values.output_name;
   if (!values.hf_token) delete values.hf_token;
+  if (!values.good_config || !values.good_config.trim()) delete values.good_config;
+  if (!values.bad_config || !values.bad_config.trim()) delete values.bad_config;
   return values;
 }
+
+// Auto-detect the configs of an entered HF dataset so multi-config datasets
+// (which Heretic can't load by ID) can be picked from a list and resolved.
+const datasetConfigRequest = { good: 0, bad: 0 };
+async function detectDatasetConfigs(side) {
+  const repo = $(`#${side}Dataset`).value.trim();
+  const datalist = $(`#${side}ConfigOptions`);
+  const hint = $(`#${side}DatasetHint`);
+  const requestId = ++datasetConfigRequest[side];
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { datalist.innerHTML = ''; hint.hidden = true; return; }
+  try {
+    const data = await api(`/api/hf/dataset/configs?repo_id=${encodeURIComponent(repo)}`);
+    if (requestId !== datasetConfigRequest[side]) return;
+    const configs = data.configs || [];
+    datalist.innerHTML = configs.map((c) => `<option value="${c.name}">`).join('');
+    if (configs.length) {
+      hint.hidden = false;
+      hint.textContent = t('configsDetected', { count: configs.length, list: configs.map((c) => c.name).join('、') });
+      if (data.suggested_column && $(`#${side}Column`).value === 'text') $(`#${side}Column`).value = data.suggested_column;
+    } else {
+      hint.hidden = true;
+    }
+  } catch (error) {
+    if (requestId !== datasetConfigRequest[side]) return;
+    datalist.innerHTML = ''; hint.hidden = true;
+  }
+}
+['good', 'bad'].forEach((side) => {
+  $(`#${side}Dataset`).addEventListener('change', () => detectDatasetConfigs(side));
+});
 
 document.querySelectorAll('.nav-item').forEach((button) => button.addEventListener('click', () => showView(button.dataset.view)));
 $('#languageSelect').addEventListener('change', (event) => setLanguage(event.target.value));

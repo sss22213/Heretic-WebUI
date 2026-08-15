@@ -21,8 +21,17 @@ from app.main import (
     UISettingsRequest,
     job_environment,
     output_artifacts_complete,
+    prompt_source,
     render_config,
+    resolve_dataset_configs,
+    resolved_prompt_path,
     safe_slug,
+)
+from app.dataset_resolver import (
+    clean_prompt,
+    list_dataset_configs,
+    suggest_prompt_column,
+    write_prompts,
 )
 from app.ollama_import import (
     OllamaClient,
@@ -86,6 +95,151 @@ def test_render_config_is_non_interactive_and_escapes_strings(tmp_path: Path):
     parsed = tomllib.loads(config)
     assert parsed["n_trials"] == 12
     assert parsed["good_prompts"]["dataset"] == "mlabonne/harmless_alpaca"
+
+
+def test_job_request_normalizes_dataset_config():
+    assert JobRequest(model="org/m", good_config="  ").good_config is None
+    assert JobRequest(model="org/m", good_config="good_1000").good_config == "good_1000"
+    with pytest.raises(ValidationError):
+        JobRequest(model="org/m", bad_config="bad config!")
+
+
+def test_render_config_without_config_passes_dataset_through():
+    request = JobRequest(
+        model="org/m", good_dataset="wangzhang/abliterix-datasets",
+        good_split="train[:400]", good_column="prompt",
+    )
+    parsed = tomllib.loads(render_config(request, Path("/tmp/o"), "abc123"))
+    assert parsed["good_prompts"]["dataset"] == "wangzhang/abliterix-datasets"
+    assert parsed["good_prompts"]["column"] == "prompt"
+
+
+def test_render_config_with_config_points_at_resolved_local_file():
+    request = JobRequest(
+        model="org/m",
+        good_dataset="wangzhang/abliterix-datasets", good_config="good_1000",
+        good_split="train[:400]", good_column="prompt",
+    )
+    parsed = tomllib.loads(render_config(request, Path("/tmp/o"), "abc123"))
+    good = parsed["good_prompts"]
+    # config.toml points at a local prompt file, not the HF id...
+    assert good["dataset"] == str(resolved_prompt_path("wangzhang/abliterix-datasets", "good_1000", "train[:400]", "prompt"))
+    assert good["dataset"].endswith(".txt")
+    assert "datasheets" in good["dataset"] and "_resolved" in good["dataset"]
+    # ...the split still applies (Heretic slices the lines), column is plain text.
+    assert good["split"] == "train[:400]"
+    assert good["column"] == "text"
+    # The other side has no config, so it is untouched.
+    assert parsed["bad_prompts"]["dataset"] == "mlabonne/harmful_behaviors"
+
+
+def test_resolved_prompt_path_is_deterministic_and_selection_specific():
+    a = resolved_prompt_path("org/ds", "cfg_a", "train[:400]", "prompt")
+    assert a == resolved_prompt_path("org/ds", "cfg_a", "train", "prompt")  # slice ignored
+    assert a != resolved_prompt_path("org/ds", "cfg_b", "train", "prompt")  # config matters
+    assert a != resolved_prompt_path("org/ds", "cfg_a", "train", "text")    # column matters
+    assert a.name.startswith("org-ds--cfg_a") and a.suffix == ".txt"
+
+
+def test_prompt_source_switches_on_config():
+    assert prompt_source("org/ds", "train", "prompt", None) == ("org/ds", "train", "prompt")
+    dataset, split, column = prompt_source("org/ds", "train[:400]", "prompt", "cfg")
+    assert dataset.endswith(".txt") and split == "train[:400]" and column == "text"
+
+
+def test_resolve_dataset_configs_runs_resolver_and_caches(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("app.main.DATASET_RESOLVED_DIR", tmp_path / "resolved")
+    calls = []
+
+    class FakeCompleted:
+        returncode = 0
+        stdout = "已寫入 400 筆 prompt\n"
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return FakeCompleted()
+
+    monkeypatch.setattr("app.main.subprocess.run", fake_run)
+    request = {
+        "good_dataset": "wangzhang/abliterix-datasets", "good_split": "train[:400]",
+        "good_column": "prompt", "good_config": "good_1000",
+        "bad_dataset": "mlabonne/harmful_behaviors", "bad_split": "train[:400]",
+        "bad_column": "text", "bad_config": None,
+    }
+    log = tmp_path / "run.log"
+    resolve_dataset_configs(request, {"HF_TOKEN": "x"}, log)
+    # Only the config-bearing (good) side ran; bad side passed through untouched.
+    assert len(calls) == 1
+    command = calls[0]
+    assert "app.dataset_resolver" in command
+    assert command[command.index("--config") + 1] == "good_1000"
+    assert command[command.index("--split") + 1] == "train"  # slice stripped for the loader
+
+    # Second run reuses the file the resolver produced instead of re-running.
+    # (The real resolver mkdirs this; the fake subprocess does not, so create it.)
+    resolved = resolved_prompt_path("wangzhang/abliterix-datasets", "good_1000", "train[:400]", "prompt")
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text("a\nb\n", encoding="utf-8")
+    resolve_dataset_configs(request, {"HF_TOKEN": "x"}, log)
+    assert len(calls) == 1
+    assert "沿用既有解析結果" in log.read_text(encoding="utf-8")
+
+
+def test_resolve_dataset_configs_raises_on_resolver_failure(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("app.main.DATASET_RESOLVED_DIR", tmp_path / "resolved")
+
+    class FakeCompleted:
+        returncode = 1
+        stdout = "解析資料集失敗：欄位「nope」不存在\n"
+
+    monkeypatch.setattr("app.main.subprocess.run", lambda command, **kwargs: FakeCompleted())
+    request = {
+        "good_dataset": "org/ds", "good_split": "train", "good_column": "nope", "good_config": "cfg",
+        "bad_dataset": "x/y", "bad_split": "train", "bad_column": "text", "bad_config": None,
+    }
+    with pytest.raises(RuntimeError, match="解析失敗"):
+        resolve_dataset_configs(request, {}, tmp_path / "run.log")
+
+
+def test_dataset_resolver_write_prompts_flattens_and_skips_blank(tmp_path: Path):
+    assert clean_prompt("  a\nb  ") == "a b"
+    assert clean_prompt(None) == ""
+    output = tmp_path / "out.txt"
+    written = write_prompts(["hello", "  ", "多\n行", ""], output)
+    assert written == 2
+    assert output.read_text(encoding="utf-8") == "hello\n多 行\n"
+    with pytest.raises(ValueError):
+        write_prompts(["", "   "], tmp_path / "empty.txt")
+
+
+def test_suggest_prompt_column_prefers_prompt_like_names():
+    assert suggest_prompt_column(["id", "prompt", "category"]) == "prompt"
+    assert suggest_prompt_column(["id", "user_text"]) == "user_text"
+    assert suggest_prompt_column(["id", "value"]) == "id"
+    assert suggest_prompt_column([]) is None
+
+
+def test_list_dataset_configs_reads_card_metadata(monkeypatch):
+    import app.dataset_resolver as resolver
+
+    class FakeInfo:
+        card_data = {
+            "configs": [
+                {"config_name": "good_1000", "data_files": [{"split": "train", "path": "good_1000/x.json"}]},
+                {"config_name": "harmful_1000", "data_files": [{"split": "train", "path": "harmful_1000/y.json"}]},
+            ]
+        }
+
+    class FakeApi:
+        def dataset_info(self, repo_id, token=None):
+            return FakeInfo()
+
+    monkeypatch.setattr(resolver, "HfApi", FakeApi)
+    monkeypatch.setattr(resolver, "_first_rows_columns", lambda *a: ["id", "prompt", "category"])
+    result = list_dataset_configs("wangzhang/abliterix-datasets")
+    assert [c["name"] for c in result["configs"]] == ["good_1000", "harmful_1000"]
+    assert result["configs"][0]["splits"] == ["train"]
+    assert result["suggested_column"] == "prompt"
 
 
 def test_hf_token_is_normalized_and_never_serialized():

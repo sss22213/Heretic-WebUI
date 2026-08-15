@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -29,6 +31,7 @@ from .eval_manager import (
     ollama_url_is_local,
     parse_task_list,
 )
+from .dataset_resolver import list_dataset_configs
 from .heretic_version import HereticVersionManager
 from .lora_manager import LoRAManager, adapter_supported_by_ollama, suggest_merge_base
 from .ollama_import import OllamaClient, OllamaImportManager, ollama_model_name_error
@@ -40,6 +43,7 @@ OUTPUT_DIR = Path(os.getenv("APP_OUTPUT_DIR", ROOT / "outputs")).resolve()
 MODELS_DIR = Path(os.getenv("APP_MODELS_DIR", "/models"))
 JOBS_DIR = DATA_DIR / "jobs"
 CHECKPOINT_DIR = DATA_DIR / "checkpoints"
+DATASET_RESOLVED_DIR = DATA_DIR / "datasheets" / "_resolved"
 HF_TOKEN_FILE = DATA_DIR / "hf_token"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 HERETIC_VERSION_FILE = DATA_DIR / "heretic_version.json"
@@ -69,6 +73,37 @@ def safe_slug(value: str) -> str:
     return slug[:72] or "model"
 
 
+def split_name(split: str) -> str:
+    """The split name without slice notation, e.g. "train" from "train[:400]"."""
+    return split.split("[")[0] or "train"
+
+
+def resolved_prompt_path(repo: str, config: str, split: str, column: str) -> Path:
+    """Deterministic local prompt file for a resolved HF dataset config.
+
+    Keyed by (repo, config, split-name, column) so re-running the same job
+    reuses the download, while a different selection gets its own file. A hash
+    suffix keeps the name unique after slug truncation.
+    """
+    key = f"{repo}\x00{config}\x00{split_name(split)}\x00{column}"
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:8]
+    stem = safe_slug(f"{repo}--{config}--{split_name(split)}")
+    return DATASET_RESOLVED_DIR / f"{stem}-{digest}.txt"
+
+
+def prompt_source(dataset: str, split: str, column: str, config: str | None) -> tuple[str, str, str]:
+    """Map a dataset spec onto (dataset, split, column) for config.toml.
+
+    Without a config the spec passes straight through (Heretic loads the HF
+    dataset itself). With a config, config.toml points at the pre-resolved
+    local prompt file; the split still applies (Heretic slices the lines) and
+    the column is irrelevant because the file is plain text.
+    """
+    if config:
+        return str(resolved_prompt_path(dataset, config, split, column)), split, "text"
+    return dataset, split, column
+
+
 class JobRequest(BaseModel):
     model: str = Field(min_length=1, max_length=300)
     hf_token: str | None = Field(default=None, max_length=2048, exclude=True, repr=False)
@@ -89,9 +124,11 @@ class JobRequest(BaseModel):
     good_dataset: str = Field(default="mlabonne/harmless_alpaca", min_length=1, max_length=300)
     good_split: str = Field(default="train[:400]", min_length=1, max_length=100)
     good_column: str = Field(default="text", min_length=1, max_length=100)
+    good_config: str | None = Field(default=None, max_length=128)
     bad_dataset: str = Field(default="mlabonne/harmful_behaviors", min_length=1, max_length=300)
     bad_split: str = Field(default="train[:400]", min_length=1, max_length=100)
     bad_column: str = Field(default="text", min_length=1, max_length=100)
+    bad_config: str | None = Field(default=None, max_length=128)
 
     @field_validator("model", "good_dataset", "bad_dataset")
     @classmethod
@@ -99,6 +136,19 @@ class JobRequest(BaseModel):
         value = value.strip()
         if not value or any(ord(char) < 32 for char in value):
             raise ValueError("不可包含控制字元")
+        return value
+
+    @field_validator("good_config", "bad_config")
+    @classmethod
+    def normalize_config(cls, value: str | None) -> str | None:
+        # An empty config means "plain dataset, let Heretic load it directly".
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value):
+            raise ValueError("無效的 dataset config 名稱")
         return value
 
     @field_validator("hf_token")
@@ -318,18 +368,20 @@ def render_config(request: JobRequest, output_directory: Path, job_id: str) -> s
         else:
             encoded = toml_string(value)
         lines.append(f"{key} = {encoded}")
+    good = prompt_source(request.good_dataset, request.good_split, request.good_column, request.good_config)
+    bad = prompt_source(request.bad_dataset, request.bad_split, request.bad_column, request.bad_config)
     lines.extend(
         [
             "",
             "[good_prompts]",
-            f"dataset = {toml_string(request.good_dataset)}",
-            f"split = {toml_string(request.good_split)}",
-            f"column = {toml_string(request.good_column)}",
+            f"dataset = {toml_string(good[0])}",
+            f"split = {toml_string(good[1])}",
+            f"column = {toml_string(good[2])}",
             "",
             "[bad_prompts]",
-            f"dataset = {toml_string(request.bad_dataset)}",
-            f"split = {toml_string(request.bad_split)}",
-            f"column = {toml_string(request.bad_column)}",
+            f"dataset = {toml_string(bad[0])}",
+            f"split = {toml_string(bad[1])}",
+            f"column = {toml_string(bad[2])}",
             "",
         ]
     )
@@ -348,6 +400,48 @@ def job_environment(hf_token: str | None, heretic_source: Path | None = None) ->
         # compatibility with dependencies that still expect it.
         env.update({"HF_TOKEN": hf_token, "HUGGING_FACE_HUB_TOKEN": hf_token})
     return env
+
+
+def _append_log(log_path: Path, text: str) -> None:
+    with log_path.open("ab") as handle:
+        handle.write(text.encode("utf-8", "replace"))
+
+
+def resolve_dataset_configs(request: dict, env: dict[str, str], log_path: Path) -> None:
+    """Materialize any config-bearing HF prompt datasets to local files.
+
+    Runs before Heretic so a multi-config dataset (which Heretic cannot load by
+    ID) becomes a plain-text prompt file it can read. Cached across runs by the
+    deterministic resolved path; a failure aborts the job with a logged reason.
+    """
+    sides = (
+        ("harmless", "good_dataset", "good_split", "good_column", "good_config"),
+        ("harmful", "bad_dataset", "bad_split", "bad_column", "bad_config"),
+    )
+    for label, dataset_key, split_key, column_key, config_key in sides:
+        config = request.get(config_key)
+        if not config:
+            continue
+        dataset = request[dataset_key]
+        split = request[split_key]
+        column = request[column_key]
+        output = resolved_prompt_path(dataset, config, split, column)
+        if output.is_file() and output.stat().st_size > 0:
+            _append_log(log_path, f"沿用既有解析結果（{label}）：{output.name}\n")
+            continue
+        command = [
+            sys.executable, "-u", "-m", "app.dataset_resolver",
+            "--repo", dataset, "--config", config,
+            "--split", split_name(split), "--column", column,
+            "--output", str(output),
+        ]
+        _append_log(log_path, f"解析 {label} 資料集 {dataset} (config={config}) …\n")
+        result = subprocess.run(
+            command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        _append_log(log_path, (result.stdout or "") + "\n")
+        if result.returncode != 0:
+            raise RuntimeError(f"{label} 資料集 config「{config}」解析失敗，請檢查日誌。")
 
 
 def output_artifacts_complete(job: Job, output_directory: Path | None = None) -> bool:
@@ -539,6 +633,7 @@ class JobManager:
                     f"任務指定的 Heretic {job.heretic_commit[:7]} 已不在 slot {job.heretic_slot}"
                 )
             env = job_environment(hf_token, Path(runtime["path"]))
+            resolve_dataset_configs(job.request, env, log_path)
             with log_path.open("ab", buffering=0) as log:
                 process = subprocess.Popen(
                     [HERETIC_BIN],
@@ -973,6 +1068,17 @@ def delete_eval(run_id: str):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/hf/dataset/configs")
+def get_dataset_configs(repo_id: str = Query(min_length=3, max_length=200)):
+    repo_id = repo_id.strip()
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", repo_id):
+        raise HTTPException(status_code=400, detail="Hugging Face dataset ID 格式應為 organization/repository")
+    try:
+        return list_dataset_configs(repo_id, hf_token_store.get())
+    except Exception as exc:  # noqa: BLE001 - surface any hub/network error to the UI
+        raise HTTPException(status_code=502, detail=f"無法取得 dataset config：{exc}") from exc
 
 
 @app.get("/api/jobs")

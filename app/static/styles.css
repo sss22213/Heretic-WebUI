@@ -56,7 +56,10 @@ h2 { margin: 0; font-size: 16px; line-height: 1.3; font-weight: 500; letter-spac
 .fields { display: grid; gap: 18px 16px; }
 .two-col { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .three-col { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.span-2 { grid-column: span 2; } .span-3 { grid-column: span 3; }
+.four-col { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.span-2 { grid-column: span 2; } .span-3 { grid-column: span 3; } .span-4 { grid-column: span 4; }
+.details-note { margin: 0 0 4px; color: var(--ink-tertiary); font-size: 12px; line-height: 1.5; }
+.details-hint { margin-top: -6px; font-size: 12px; line-height: 1.5; font-weight: 500; color: var(--accent, var(--ink-muted)); }
 .field { min-width: 0; display: flex; flex-direction: column; gap: 7px; color: var(--ink-muted); font-size: 12px; font-weight: 500; }
 .field input, .field select, .field textarea { width: 100%; min-height: 42px; padding: 9px 12px; color: var(--ink); background: var(--surface-2); border: 1px solid var(--hairline-strong); border-radius: 8px; outline: none; font-weight: 400; transition: border-color .15s, box-shadow .15s; }
 .field textarea { min-height: 90px; resize: vertical; font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 13px; line-height: 1.5; }
@@ -173,7 +176,8 @@ details[open] .chevron { transform: rotate(180deg); }
   .shell { grid-template-columns: 190px minmax(0, 1fr); }
   .workspace { padding: 40px 28px 64px; }
   .three-col { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .span-3 { grid-column: span 2; }
+  .four-col { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .span-3 { grid-column: span 2; } .span-4 { grid-column: span 2; }
   .model-library { grid-template-columns: 1fr; }
   .lora-forms { grid-template-columns: 1fr; }
   .version-summary { grid-template-columns: 1fr; }
@@ -197,8 +201,8 @@ details[open] .chevron { transform: rotate(180deg); }
   .language-control select { min-width: 94px; }
   h1 { font-size: 30px; letter-spacing: -.7px; }
   .page-subtitle { display: none; }
-  .two-col, .three-col { grid-template-columns: 1fr; }
-  .span-2, .span-3 { grid-column: span 1; }
+  .two-col, .three-col, .four-col { grid-template-columns: 1fr; }
+  .span-2, .span-3, .span-4 { grid-column: span 1; }
   .form-section, .library-section { padding: 18px; }
   .form-actions { align-items: stretch; flex-direction: column; gap: 10px; }
   .form-actions p { order: 2; }
