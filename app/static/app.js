@@ -640,8 +640,13 @@ bindJobForm({ formId: '#araJobForm', buttonId: '#araSubmitButton', quantNoticeId
 // requires ARA to be enabled.
 function syncAraToggles() {
   const useAra = $('#araUseAra').checked;
+  const useAraLora = $('#araUseAraLora').checked;
   $('#araUseAraLora').disabled = !useAra;
-  $('#araLoraRank').disabled = !useAra || !$('#araUseAraLora').checked;
+  $('#araLoraRank').disabled = !useAra || !useAraLora;
+  // Upstream's ARA-LoRA save path only writes the adapter, so a merge export
+  // would fail after the run; switch the form to the workable format.
+  const exportSelect = $('#araJobForm').elements.export_strategy;
+  if (useAraLora && exportSelect.value === 'merge') exportSelect.value = 'adapter';
 }
 $('#araUseAra').addEventListener('change', syncAraToggles);
 $('#araUseAraLora').addEventListener('change', syncAraToggles);

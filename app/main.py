@@ -188,17 +188,29 @@ class JobRequest(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def check_ara_adapter_export(self):
-        # In the ara branch, full-weight ARA edits the model in place, so there
-        # is no LoRA adapter to export unless ARA-LoRA mode is enabled.
-        if (
-            self.heretic_channel == "ara"
-            and self.export_strategy == "adapter"
-            and self.use_ara
-            and not self.use_ara_lora
-        ):
+    def check_ara_combinations(self):
+        if self.heretic_channel != "ara":
+            return self
+        # Upstream picks the ARA-LoRA path whenever use_ara_lora is set;
+        # otherwise use_ara selects full-weight ARA.
+        ara_full = self.use_ara and not self.use_ara_lora
+        if ara_full and self.quantization == "bnb_4bit":
+            raise ValueError(
+                "全權重 ARA 無法在 4-bit 量化模型上運作（第一個 trial 就會因量化權重而崩潰）；"
+                "請啟用 ARA LoRA 模式，或改用不量化載入"
+            )
+        # Full-weight ARA edits the model in place, so there is no LoRA
+        # adapter to export.
+        if ara_full and self.export_strategy == "adapter":
             raise ValueError(
                 "ARA 全權重模式沒有可匯出的 LoRA adapter；請改用完整合併模型，或啟用 ARA LoRA 模式"
+            )
+        # In ARA-LoRA mode the upstream save path writes only the adapter, so a
+        # "merge" export would end a long run with incomplete weights.
+        if self.use_ara_lora and self.export_strategy == "merge":
+            raise ValueError(
+                "ARA LoRA 模式的上游存檔流程只會輸出 adapter，完整合併模型會失敗；"
+                "請將匯出格式改為 LoRA adapter，完成後用「LoRA 管理 → 合併為完整模型」產生完整權重"
             )
         return self
 

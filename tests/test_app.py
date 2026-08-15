@@ -1685,6 +1685,7 @@ def test_job_request_ara_channel_and_render_config(tmp_path: Path):
         use_ara_lora=True,
         ara_lora_rank=64,
         use_piqa=True,
+        export_strategy="adapter",
     )
     parsed = tomllib.loads(render_config(request, tmp_path / "output", "abc123"))
 
@@ -1700,7 +1701,7 @@ def test_job_request_ara_channel_and_render_config(tmp_path: Path):
     assert parsed["model_action"] == "save"
     assert parsed["checkpoint_action"] == "continue"
     assert parsed["trial_index"] == 0
-    assert parsed["export_strategy"] == "merge"
+    assert parsed["export_strategy"] == "adapter"
     assert parsed["good_prompts"]["dataset"] == "mlabonne/harmless_alpaca"
 
 
@@ -1722,6 +1723,26 @@ def test_ara_full_weight_mode_rejects_adapter_export():
     )
     assert ara_lora.export_strategy == "adapter"
     assert JobRequest(model="org/model", export_strategy="adapter").export_strategy == "adapter"
+
+
+def test_ara_rejects_run_ending_combinations():
+    # Full-weight ARA crashes on bitsandbytes-quantized weights at trial 1.
+    with pytest.raises(ValidationError):
+        JobRequest(model="org/model", heretic_channel="ara", quantization="bnb_4bit")
+    # ARA-LoRA merge export would finish the run with adapter-only artifacts.
+    with pytest.raises(ValidationError):
+        JobRequest(
+            model="org/model", heretic_channel="ara",
+            use_ara_lora=True, export_strategy="merge",
+        )
+    # The workable quantized setup: ARA-LoRA plus adapter export.
+    request = JobRequest(
+        model="org/model", heretic_channel="ara",
+        quantization="bnb_4bit", use_ara_lora=True, export_strategy="adapter",
+    )
+    assert request.quantization == "bnb_4bit"
+    # master is unaffected by the ara guards.
+    assert JobRequest(model="org/model", quantization="bnb_4bit").quantization == "bnb_4bit"
 
 
 def test_ara_patch_present_and_targets_expected_files():
