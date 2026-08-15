@@ -405,6 +405,8 @@ function renderHereticVersion(version, channel = 'master') {
   dirtyFiles.textContent = dirty ? `未提交修改：\n${version.dirty_files.join('\n')}` : '';
   if (dirty) {
     $(`#hereticVersionNotice${suffix}`).textContent = '偵測到未提交的本機修改。為避免覆蓋，更新與退回功能已鎖定。';
+  } else if (version.patch_update_available) {
+    $(`#hereticVersionNotice${suffix}`).textContent = 'Managed patch 已變更；按「更新至最新版」以套用新 patch 重建（同一個 commit 也會重建）。更新後請重新建立任務，不要重試舊任務。';
   } else if (version.rebuild_required) {
     $(`#hereticVersionNotice${suffix}`).textContent = '依賴檔案曾變更，請重新建置 Docker image 後再執行模型任務。';
   } else if (version.managed_patches_applied) {
@@ -415,7 +417,7 @@ function renderHereticVersion(version, channel = 'master') {
   } else {
     $(`#hereticVersionNotice${suffix}`).textContent = 'Working tree 乾淨，可以安全檢查或更新版本。';
   }
-  $(`#updateVersionButton${suffix}`).disabled = dirty || !version.update_available;
+  $(`#updateVersionButton${suffix}`).disabled = dirty || !(version.update_available || version.patch_update_available);
   $(`#rollbackVersionButton${suffix}`).disabled = dirty || !version.rollback_available;
 }
 

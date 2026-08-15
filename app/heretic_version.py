@@ -117,6 +117,17 @@ class HereticVersionManager:
             return []
         return sorted(self.patch_dir.glob("*.patch"))
 
+    def _patches_signature(self) -> str:
+        import hashlib
+
+        digest = hashlib.sha256()
+        for patch in self._patches():
+            digest.update(patch.name.encode())
+            digest.update(b"\0")
+            digest.update(patch.read_bytes())
+            digest.update(b"\0")
+        return digest.hexdigest()
+
     def _commit_info(self, revision: str) -> dict:
         values = self._git_source(
             "show", "-s", "--format=%H%n%h%n%s%n%cI", revision
@@ -214,6 +225,7 @@ class HereticVersionManager:
                 "built_at": utc_now(),
                 "path": str(destination),
                 "patches": patch_results,
+                "patches_signature": self._patches_signature(),
                 "dependency_signature": self._dependency_signature(temporary),
             }
             shutil.rmtree(destination, ignore_errors=True)
@@ -292,6 +304,12 @@ class HereticVersionManager:
                 ),
                 "updated_at": state.get("switched_at"),
                 "rebuild_required": bool(state.get("rebuild_required")),
+                # The managed patch set changed since this slot was built; an
+                # update rebuilds with the current patches even on the same
+                # upstream commit.
+                "patch_update_available": (
+                    active.get("patches_signature") != self._patches_signature()
+                ),
             }
             if check_remote:
                 self._ensure_source_repo()
@@ -316,7 +334,10 @@ class HereticVersionManager:
                 "fetch", "--no-tags", self.remote, self.branch, timeout=180
             )
             target = self._git_source("rev-parse", "FETCH_HEAD")
-            if target == active["commit"]:
+            if (
+                target == active["commit"]
+                and active.get("patches_signature") == self._patches_signature()
+            ):
                 return {
                     **self.status(),
                     "changed": False,

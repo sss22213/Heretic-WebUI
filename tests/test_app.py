@@ -1733,6 +1733,10 @@ def test_ara_patch_present_and_targets_expected_files():
     assert "trial_index" in text
     assert "save_directory" in text
     assert "max_shard_size" in text
+    # The ara branch predates master's plain-text prompt loader, which the
+    # resolved-dataset feature depends on; the patch must backport it.
+    assert "a/src/heretic/utils.py" in text
+    assert "os.path.isfile" in text
 
 
 def test_version_manager_tracks_configured_branch(tmp_path: Path):
@@ -1786,3 +1790,45 @@ def test_version_manager_tracks_configured_branch(tmp_path: Path):
     updated = manager.update()
     assert updated["commit"] == ara_second
     assert updated["branch"] == "ara"
+
+
+def test_version_manager_rebuilds_when_patch_set_changes(tmp_path: Path):
+    remote = tmp_path / "remote.git"
+    seed = tmp_path / "seed"
+    checkout = tmp_path / "checkout"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    seed.mkdir()
+    _git(seed, "init", "-b", "master")
+    _git(seed, "config", "user.email", "test@example.com")
+    _git(seed, "config", "user.name", "Test")
+    (seed / "pyproject.toml").write_text("version = '1'\n")
+    (seed / "uv.lock").write_text("lock-1\n")
+    (seed / "source.py").write_text("value = 1\n")
+    (seed / "src" / "heretic").mkdir(parents=True)
+    (seed / "src" / "heretic" / "__init__.py").write_text("")
+    (seed / "src" / "heretic" / "main.py").write_text("")
+    _git(seed, "add", ".")
+    _git(seed, "commit", "-m", "one")
+    first = _git(seed, "rev-parse", "HEAD")
+    _git(seed, "remote", "add", "origin", str(remote))
+    _git(seed, "push", "-u", "origin", "master")
+    subprocess.run(["git", "clone", str(remote), str(checkout)], check=True, capture_output=True)
+
+    patch_dir = tmp_path / "patches"
+    patch_dir.mkdir()
+    manager = HereticVersionManager(checkout, tmp_path / "state.json", patch_dir)
+    assert manager.status()["patch_update_available"] is False
+    assert manager.update()["changed"] is False
+
+    # A new managed patch appears after the slot was built: the same upstream
+    # commit must be rebuilt so the patch takes effect.
+    (checkout / "source.py").write_text("value = 99\n")
+    (patch_dir / "0001-local.patch").write_text(_git(checkout, "diff", "--binary") + "\n")
+    _git(checkout, "checkout", "--", "source.py")
+
+    assert manager.status()["patch_update_available"] is True
+    updated = manager.update()
+    assert updated["changed"] is True
+    assert updated["commit"] == first
+    assert updated["patch_update_available"] is False
+    assert (Path(manager.runtime_info()["path"]) / "source.py").read_text() == "value = 99\n"

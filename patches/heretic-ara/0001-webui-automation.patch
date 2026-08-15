@@ -163,3 +163,32 @@ index b633484..79b3594 100644
  
  def main():
      # Install Rich traceback handler.
+diff --git a/src/heretic/utils.py b/src/heretic/utils.py
+index 96896ad..825c4b1 100644
+--- a/src/heretic/utils.py
++++ b/src/heretic/utils.py
+@@ -174,7 +174,23 @@ def load_prompts(
+     path = specification.dataset
+     split_str = specification.split
+ 
+-    if os.path.isdir(path):
++    if os.path.isfile(path):
++        # Plain text file with one prompt per line (backported from master).
++        # Empty lines are ignored.
++        with open(path, encoding="utf-8") as file:
++            lines = [line.strip() for line in file if line.strip()]
++
++        # The split is optional for text files. When given, it selects a subset
++        # of the lines using slice notation (e.g. "[:400]"). A synthetic split
++        # name is prepended because ReadInstruction expects a named split.
++        if split_str:
++            instruction = ReadInstruction.from_spec(f"_{split_str}")
++            name2len = {f"_{split_str}".split("[")[0]: len(lines)}
++            absolute = instruction.to_absolute(name2len)[0]
++            lines = lines[absolute.from_ : absolute.to]
++
++        dataset = {specification.column: lines}
++    elif os.path.isdir(path):
+         if Path(path, DATASET_STATE_JSON_FILENAME).exists():
+             # Dataset saved with datasets.save_to_disk; needs special handling.
+             # Path should be the subdirectory for a particular split.
