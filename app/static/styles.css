@@ -175,6 +175,8 @@ details[open] .chevron { transform: rotate(180deg); }
 .trial-option:hover { background: var(--surface-3); }
 .trial-option code { display: inline; padding: 0; border: 0; background: none; color: var(--ink-muted); white-space: nowrap; overflow: visible; }
 .trial-option small { color: var(--ink-subtle); }
+.trial-option-disabled { opacity: .55; cursor: not-allowed; }
+.trial-option-disabled:hover { background: none; }
 .toast { position: fixed; z-index: 60; right: 24px; bottom: 24px; max-width: 380px; padding: 11px 14px; color: var(--ink); background: var(--surface-3); border: 1px solid var(--hairline-strong); border-radius: 8px; opacity: 0; transform: translateY(10px); pointer-events: none; transition: .2s; }
 .toast.show { opacity: 1; transform: translateY(0); }
 

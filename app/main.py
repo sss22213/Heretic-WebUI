@@ -842,11 +842,13 @@ class JobManager:
                         job.error = f"Heretic 結束碼：{exit_code}"
                     expected_trial = job.request.get("reexport_trial_number")
                     if job.status == "completed" and expected_trial and not self._log_confirms_trial(
-                        log_path, expected_trial
+                        log_path,
+                        expected_trial,
+                        require_snapshot=bool(job.request.get("use_ara_lora")),
                     ):
                         job.status = "failed"
                         job.error = (
-                            f"匯出的 trial 與要求不符（預期 trial {expected_trial}）。"
+                            f"匯出未經 snapshot 還原或 trial 不符（預期 trial {expected_trial}）。"
                             "請先在「Heretic 版本」頁更新 ara slot 套用最新 patch，再重新匯出。"
                         )
                 job.exit_code = exit_code
@@ -928,12 +930,17 @@ class JobManager:
         except OSError:
             return ""
 
-    def _log_confirms_trial(self, log_path: Path, trial_number: int) -> bool:
+    def _log_confirms_trial(
+        self, log_path: Path, trial_number: int, require_snapshot: bool = False
+    ) -> bool:
         """Whether the log shows Heretic restored the requested trial.
 
         Guards against an ara slot that predates the patch which keeps the
         invocation's trial_index over the checkpoint-stored one — that slot
-        would silently export front entry 0 instead.
+        would silently export front entry 0 instead. With require_snapshot,
+        additionally demands the snapshot-restore line: ARA-LoRA re-runs LBFGS
+        from process-local warm-start state, so an export that re-ran the
+        ablation instead of loading the stored snapshot is corrupt.
         """
         try:
             with log_path.open("rb") as handle:
@@ -941,7 +948,11 @@ class JobManager:
                 tail = handle.read().decode("utf-8", errors="replace")
         except OSError:
             return False
-        return f"Restoring model from trial {trial_number}..." in tail
+        if f"Restoring model from trial {trial_number}..." not in tail:
+            return False
+        if require_snapshot:
+            return f"Restored adapter snapshot for trial {trial_number}." in tail
+        return True
 
     def log(self, job_id: str, offset: int) -> tuple[str, int]:
         self.get(job_id)
@@ -1405,6 +1416,16 @@ def ara_job_or_error(job_id: str) -> Job:
     return job
 
 
+def ara_snapshot_file(job_id: str, trial_number: int) -> Path:
+    return (
+        CHECKPOINT_DIR
+        / job_id
+        / "trial_snapshots"
+        / f"trial_{trial_number}"
+        / "adapter_snapshot.safetensors"
+    )
+
+
 @app.get("/api/jobs/{job_id}/trials")
 def get_job_trials(job_id: str):
     job = ara_job_or_error(job_id)
@@ -1412,6 +1433,11 @@ def get_job_trials(job_id: str):
     data["exportable"] = (
         job.status == "completed" and (CHECKPOINT_DIR / job_id).is_dir()
     )
+    # ARA-LoRA restores are only faithful from an adapter snapshot (patch v4);
+    # re-running LBFGS in a fresh process produces a corrupt adapter.
+    data["needs_snapshot"] = bool(job.request.get("use_ara_lora"))
+    for entry in data["front"]:
+        entry["has_snapshot"] = ara_snapshot_file(job_id, entry["trial"]).is_file()
     return data
 
 
@@ -1430,6 +1456,21 @@ def create_job_reexport(job_id: str, request: TrialExportRequest):
     if invalid:
         raise HTTPException(status_code=400, detail=f"front index 超出範圍：{invalid}")
     selections = [front[index] for index in sorted(request.front_indices)]
+    if job.request.get("use_ara_lora"):
+        missing = [
+            selection["trial"]
+            for selection in selections
+            if not ara_snapshot_file(job_id, selection["trial"]).is_file()
+        ]
+        if missing:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"trial {missing} 沒有 adapter snapshot，無法忠實匯出。"
+                    "此任務是在 patch v4 之前跑的：舊流程重新匯出會重跑 LBFGS，"
+                    "冷啟動會產生損壞的 adapter，已停用。請更新 ara slot 後重新跑最佳化。"
+                ),
+            )
     try:
         jobs = manager.create_reexports(job, selections)
     except RuntimeError as exc:

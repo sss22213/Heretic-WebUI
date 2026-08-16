@@ -668,9 +668,16 @@ async function openTrialsModal() {
     const front = data.front || [];
     if (!front.length) { toast('日誌中找不到 trial 結果'); return; }
     if (!data.exportable) { toast('此任務的 checkpoint 已不存在，無法重新匯出'); return; }
+    // ARA-LoRA 只能從最佳化當下存的 snapshot 忠實還原；重跑 LBFGS 會產生
+    // 損壞的 adapter，所以沒有 snapshot 的 trial 直接停用。
+    const blocked = (trial) => data.needs_snapshot && !trial.has_snapshot;
+    if (data.needs_snapshot && front.every(blocked)) {
+      toast('此任務沒有 trial snapshot（patch v4 之前跑的），無法忠實重新匯出；請更新 ara slot 後重新跑最佳化');
+      return;
+    }
     $('#trialList').innerHTML = front.map((trial) => `
-      <label class="trial-option"><input type="checkbox" value="${trial.front_index}">
-        <span>Trial ${trial.trial}</span><code>拒答 ${trial.refusals}/${trial.denominator} · KL ${trial.kl.toFixed(4)}</code>${trial.front_index === 0 ? '<small>（原始匯出）</small>' : ''}
+      <label class="trial-option${blocked(trial) ? ' trial-option-disabled' : ''}"><input type="checkbox" value="${trial.front_index}"${blocked(trial) ? ' disabled' : ''}>
+        <span>Trial ${trial.trial}</span><code>拒答 ${trial.refusals}/${trial.denominator} · KL ${trial.kl.toFixed(4)}</code>${blocked(trial) ? '<small>（無 snapshot，無法匯出）</small>' : trial.front_index === 0 ? '<small>（原始匯出）</small>' : ''}
       </label>`).join('');
     $('#trialsConfirm').disabled = true;
     $('#trialList').querySelectorAll('input').forEach((box) => box.addEventListener('change', () => {

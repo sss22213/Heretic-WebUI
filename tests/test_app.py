@@ -1763,6 +1763,13 @@ def test_ara_patch_present_and_targets_expected_files():
     # Trial re-export needs the invocation's automation keys to survive the
     # checkpoint-settings restore.
     assert "setattr(restored" in text
+    # ARA-LoRA restores are only faithful from a Pareto-front adapter snapshot
+    # saved during optimization; re-running LBFGS cold produces a corrupt
+    # adapter (warm-start state is process-local).
+    assert "trial_snapshots" in text
+    assert "update_pareto_snapshots" in text
+    assert "Saved adapter snapshot for trial" in text
+    assert "Restored adapter snapshot for trial" in text
 
 
 def test_version_manager_tracks_configured_branch(tmp_path: Path):
@@ -2001,6 +2008,81 @@ def test_reexport_jobs_queue_and_start_sequentially(tmp_path: Path, monkeypatch)
     manager._start_next_queued()
     time.sleep(0.2)
     assert ran == [created[0].id, created[1].id]
+
+
+def test_log_confirms_trial_snapshot_requirement(tmp_path: Path):
+    manager = JobManager.__new__(JobManager)
+
+    restored = tmp_path / "restored.log"
+    restored.write_text(
+        "Restoring model from trial 159...\n"
+        "* Restored adapter snapshot for trial 159.\n",
+        encoding="utf-8",
+    )
+    assert manager._log_confirms_trial(restored, 159)
+    assert manager._log_confirms_trial(restored, 159, require_snapshot=True)
+
+    # An old slot re-runs the ablation instead of loading the snapshot;
+    # for ARA-LoRA that export is corrupt and must be rejected.
+    rerun = tmp_path / "rerun.log"
+    rerun.write_text(
+        "Restoring model from trial 159...\n"
+        "* Abliterating (Arbitrary-Rank Ablation with LoRA)...\n",
+        encoding="utf-8",
+    )
+    assert manager._log_confirms_trial(rerun, 159)
+    assert not manager._log_confirms_trial(rerun, 159, require_snapshot=True)
+
+
+def test_reexport_endpoint_requires_adapter_snapshots(tmp_path: Path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "CHECKPOINT_DIR", tmp_path / "checkpoints")
+    job_id = "b" * 12
+    request = main_module.JobRequest(
+        model="org/m", heretic_channel="ara",
+        use_ara_lora=True, export_strategy="adapter",
+    )
+    job = main_module.Job(
+        id=job_id, status="completed", request=request.model_dump(),
+        output_directory=str(tmp_path / "out"),
+        created_at=main_module.utc_now(), heretic_channel="ara",
+    )
+    monkeypatch.setitem(main_module.manager.jobs, job_id, job)
+    log = (
+        "Running trial 3 of 4...\n"
+        "  * KL divergence: 0.3500\n"
+        "  * Refusals: 0/100\n"
+    )
+    monkeypatch.setattr(main_module.JobManager, "log_text", lambda self, jid: log)
+    (tmp_path / "checkpoints" / job_id).mkdir(parents=True)
+    client = TestClient(main_module.app)
+
+    data = client.get(f"/api/jobs/{job_id}/trials").json()
+    assert data["needs_snapshot"] is True
+    assert data["front"][0]["has_snapshot"] is False
+
+    response = client.post(f"/api/jobs/{job_id}/reexport", json={"front_indices": [0]})
+    assert response.status_code == 409
+    assert "snapshot" in response.json()["detail"]
+
+    snapshot = main_module.ara_snapshot_file(job_id, 3)
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_bytes(b"stub")
+    queued = []
+
+    def fake_create_reexports(self, source, selections):
+        queued.append(selections)
+        return []
+
+    monkeypatch.setattr(main_module.JobManager, "create_reexports", fake_create_reexports)
+    data = client.get(f"/api/jobs/{job_id}/trials").json()
+    assert data["front"][0]["has_snapshot"] is True
+    response = client.post(f"/api/jobs/{job_id}/reexport", json={"front_indices": [0]})
+    assert response.status_code == 202
+    assert queued and queued[0][0]["trial"] == 3
 
 
 def test_lora_manager_lists_and_merges_outputs_adapters(tmp_path: Path, monkeypatch):

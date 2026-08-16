@@ -52,10 +52,26 @@ index b5bdb6b..080cd2c 100644
          default=[
              BenchmarkSpecification(
 diff --git a/src/heretic/main.py b/src/heretic/main.py
-index b633484..16a0311 100644
+index b633484..c766a53 100644
 --- a/src/heretic/main.py
 +++ b/src/heretic/main.py
-@@ -76,6 +76,9 @@ def obtain_merge_strategy(settings: Settings) -> str | None:
+@@ -12,6 +12,7 @@ patch_tqdm()
+ import logging
+ import math
+ import os
++import shutil
+ import sys
+ import time
+ import warnings
+@@ -49,6 +50,7 @@ from pydantic import ValidationError
+ from questionary import Choice, Style
+ from rich.table import Table
+ from rich.traceback import install
++from safetensors.torch import load_file, save_file
+ 
+ from .analyzer import Analyzer
+ from .config import QuantizationMethod, RowNormalization, Settings
+@@ -76,6 +78,9 @@ def obtain_merge_strategy(settings: Settings) -> str | None:
      Returns "merge", "adapter", or None (if cancelled/invalid).
      """
  
@@ -65,7 +81,7 @@ index b633484..16a0311 100644
      if settings.quantization == QuantizationMethod.BNB_4BIT:
          print()
          print(
-@@ -320,13 +323,29 @@ def run():
+@@ -320,13 +325,29 @@ def run():
              )
          )
  
@@ -98,7 +114,100 @@ index b633484..16a0311 100644
          elif choice == "restart":
              os.unlink(study_checkpoint_file)
              backend = JournalFileBackend(study_checkpoint_file, lock_obj=lock_obj)
-@@ -772,8 +791,11 @@ def run():
+@@ -498,6 +519,82 @@ def run():
+     start_index = 0
+     start_time = time.perf_counter()
+ 
++    def snapshot_path(trial_number: int) -> str:
++        return os.path.join(
++            settings.study_checkpoint_dir,
++            "trial_snapshots",
++            f"trial_{trial_number}",
++            "adapter_snapshot.safetensors",
++        )
++
++    def update_pareto_snapshots(trial: Trial) -> None:
++        # ARA-LoRA ablation runs LBFGS warm-started from process-local adapter
++        # state (reset_model() only zeroes lora_B), so re-running it in a fresh
++        # process does not reproduce the scored trial. Persist the LoRA weights
++        # of trials on the current Pareto front so exports can restore them.
++        entries = []
++        for candidate in trial.study.trials:
++            if candidate.number != trial.number and candidate.state != TrialState.COMPLETE:
++                continue
++            attrs = candidate.user_attrs
++            if "refusals" not in attrs or "kl_divergence" not in attrs:
++                continue
++            entries.append((attrs["refusals"], attrs["kl_divergence"], attrs["index"]))
++        entries.sort(key=lambda entry: (entry[0], entry[1]))
++        front = set()
++        min_divergence = math.inf
++        for refusals, kl_divergence, index in entries:
++            if kl_divergence < min_divergence:
++                min_divergence = kl_divergence
++                front.add(index)
++        snapshot_root = os.path.join(settings.study_checkpoint_dir, "trial_snapshots")
++        if os.path.isdir(snapshot_root):
++            for name in os.listdir(snapshot_root):
++                if not name.startswith("trial_"):
++                    continue
++                try:
++                    index = int(name.split("_", 1)[1])
++                except ValueError:
++                    continue
++                if index not in front:
++                    shutil.rmtree(os.path.join(snapshot_root, name), ignore_errors=True)
++        current_index = trial.user_attrs["index"]
++        if current_index in front:
++            weights = {
++                name: parameter.detach().cpu().contiguous()
++                for name, parameter in model.model.named_parameters()
++                if "lora_A" in name or "lora_B" in name
++            }
++            path = snapshot_path(current_index)
++            try:
++                os.makedirs(os.path.dirname(path), exist_ok=True)
++                save_file(weights, path)
++                print(f"* Saved adapter snapshot for trial {current_index}.")
++            except OSError as error:
++                print(f"* WARNING: Could not save adapter snapshot: {error}")
++
++    def restore_adapter_snapshot(trial_number: int) -> bool:
++        path = snapshot_path(trial_number)
++        if not os.path.isfile(path):
++            return False
++        print("* Resetting model...")
++        model.reset_model()
++        print("* Loading adapter snapshot...")
++        weights = load_file(path)
++        parameters = dict(model.model.named_parameters())
++        missing = [name for name in weights if name not in parameters]
++        if missing:
++            raise RuntimeError(
++                f"Adapter snapshot does not match the model (missing {missing[0]})"
++            )
++        with torch.no_grad():
++            for name, value in weights.items():
++                parameters[name].copy_(
++                    value.to(parameters[name].device, parameters[name].dtype)
++                )
++        print(f"* Restored adapter snapshot for trial {trial_number}.")
++        return True
++
+     def objective(trial: Trial) -> tuple[float, float]:
+         nonlocal trial_index
+         trial_index += 1
+@@ -659,6 +756,9 @@ def run():
+         trial.set_user_attr("kl_divergence", kl_divergence)
+         trial.set_user_attr("refusals", refusals)
+ 
++        if settings.use_ara_lora:
++            update_pareto_snapshots(trial)
++
+         return score
+ 
+     def objective_wrapper(trial: Trial) -> tuple[float, float]:
+@@ -772,8 +872,11 @@ def run():
          )
  
          while True:
@@ -112,7 +221,34 @@ index b633484..16a0311 100644
  
              if trial == "continue":
                  while True:
-@@ -851,17 +873,22 @@ def run():
+@@ -820,14 +923,18 @@ def run():
+             for name, value in get_trial_parameters(settings, trial).items():
+                 print(f"  * {name} = [bold]{value}[/]")
+             if settings.use_ara_lora:
+-                print("* Resetting model...")
+-                model.reset_model()
+-                print("* Abliterating (Arbitrary-Rank Ablation with LoRA)...")
+-                model.ara_lora_abliterate(
+-                    good_module_io,
+-                    bad_module_io,
+-                    ARAParameters(**trial.user_attrs["ara_parameters"]),
+-                )
++                if not restore_adapter_snapshot(trial.user_attrs["index"]):
++                    print("* WARNING: No adapter snapshot found for this trial.")
++                    print("* Re-running the ablation. LBFGS in a fresh process may not")
++                    print("* reproduce the scored trial; verify the exported model.")
++                    print("* Resetting model...")
++                    model.reset_model()
++                    print("* Abliterating (Arbitrary-Rank Ablation with LoRA)...")
++                    model.ara_lora_abliterate(
++                        good_module_io,
++                        bad_module_io,
++                        ARAParameters(**trial.user_attrs["ara_parameters"]),
++                    )
+             elif settings.use_ara:
+                 print("* Reloading model...")
+                 model.reset_model()
+@@ -851,17 +958,22 @@ def run():
                  )
  
              while True:
@@ -146,7 +282,7 @@ index b633484..16a0311 100644
  
                  if action is None or action == "Return to the trial selection menu":
                      break
-@@ -872,7 +899,10 @@ def run():
+@@ -872,7 +984,10 @@ def run():
                  try:
                      match action:
                          case "Save the model to a local folder":
@@ -158,7 +294,7 @@ index b633484..16a0311 100644
                              if not save_directory:
                                  continue
  
-@@ -890,7 +920,10 @@ def run():
+@@ -890,7 +1005,10 @@ def run():
                                  else:
                                      print("Saving merged model...")
                                      merged_model = model.get_merged_model()
@@ -170,7 +306,7 @@ index b633484..16a0311 100644
                                  del merged_model
                                  empty_cache()
                                  model.tokenizer.save_pretrained(save_directory)
-@@ -1148,6 +1181,11 @@ def run():
+@@ -1148,6 +1266,11 @@ def run():
                  except Exception as error:
                      print(f"[red]Error: {error}[/]")
  
