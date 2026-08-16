@@ -1853,3 +1853,25 @@ def test_version_manager_rebuilds_when_patch_set_changes(tmp_path: Path):
     assert updated["commit"] == first
     assert updated["patch_update_available"] is False
     assert (Path(manager.runtime_info()["path"]) / "source.py").read_text() == "value = 99\n"
+
+
+def test_basic_auth_guard_blocks_and_admits(monkeypatch):
+    import base64
+
+    from fastapi.testclient import TestClient
+
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "APP_BASIC_AUTH", "user:secret")
+    client = TestClient(main_module.app)
+
+    assert client.get("/api/settings").status_code == 401
+    good = {"Authorization": "Basic " + base64.b64encode(b"user:secret").decode()}
+    assert client.get("/api/settings", headers=good).status_code == 200
+    bad = {"Authorization": "Basic " + base64.b64encode(b"user:wrong").decode()}
+    assert client.get("/api/settings", headers=bad).status_code == 401
+    # The Docker HEALTHCHECK probes /api/health without credentials.
+    assert client.get("/api/health").status_code == 200
+
+    monkeypatch.setattr(main_module, "APP_BASIC_AUTH", "")
+    assert client.get("/api/settings").status_code == 200

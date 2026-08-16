@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -19,7 +21,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -69,6 +71,9 @@ HERETIC_ARA_INITIAL_REF = os.getenv(
     "HERETIC_ARA_INITIAL_REF", "25979ad7d0b4a763c03d3a464594820b73ab5c7a"
 )
 HERETIC_BIN = os.getenv("HERETIC_BIN", "heretic")
+# "user:password"; when set, every route except /api/health requires HTTP
+# Basic auth. Meant for deployments reached through a public proxy (RunPod).
+APP_BASIC_AUTH = os.getenv("APP_BASIC_AUTH", "").strip()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434").rstrip("/")
 
 for directory in (JOBS_DIR, CHECKPOINT_DIR, OUTPUT_DIR):
@@ -835,6 +840,20 @@ async def prevent_stale_frontend_assets(request, call_next):
     if request.url.path == "/" or request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
     return response
+
+
+@app.middleware("http")
+async def basic_auth_guard(request, call_next):
+    # /api/health stays open so the Docker HEALTHCHECK keeps working.
+    if APP_BASIC_AUTH and request.url.path != "/api/health":
+        expected = "Basic " + base64.b64encode(APP_BASIC_AUTH.encode("utf-8")).decode()
+        provided = request.headers.get("authorization", "")
+        if not secrets.compare_digest(provided.encode(), expected.encode()):
+            return Response(
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="Heretic WebUI"'},
+            )
+    return await call_next(request)
 
 
 @app.get("/", include_in_schema=False)

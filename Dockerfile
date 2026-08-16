@@ -29,7 +29,7 @@ FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git curl gosu libgomp1 \
+    && apt-get install -y --no-install-recommends git curl gosu libgomp1 openssh-server \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

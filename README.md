@@ -31,6 +31,8 @@ Merging a model can require substantially more system RAM than the 4-bit analysi
 
 ## Quick Start
 
+To run on a rented GPU instead of local hardware, see the [RunPod deployment guide](docs/runpod.md) (zh-TW).
+
 Clone the repository:
 
 ```bash

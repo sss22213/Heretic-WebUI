@@ -15,6 +15,8 @@
 
 `upstream-heretic/` 直接保存 Heretic source snapshot，不使用 Git submodule；一般 `git clone` 即可取得完整專案。
 
+若要改在租用的 GPU 上執行，見 [RunPod 部署指南](docs/runpod.md)。
+
 ```bash
 cp .env.example .env
 # 私有或 gated 模型才需要在 .env 填入 HF_TOKEN
