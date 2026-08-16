@@ -130,9 +130,12 @@ class LoRAManager:
         "README*", "LICENSE*",
     ]
 
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(self, data_dir: Path, output_dir: Path | None = None) -> None:
         self.root = data_dir / "loras"
         self.tasks_dir = data_dir / "lora_tasks"
+        # Heretic jobs with export_strategy=adapter save into the outputs
+        # directory; those adapters are offered for merging without copying.
+        self.output_root = output_dir.resolve() if output_dir else None
         self.root.mkdir(parents=True, exist_ok=True)
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
@@ -197,9 +200,22 @@ class LoRAManager:
             try:
                 metadata = json.loads((directory / "lora.json").read_text(encoding="utf-8"))
                 details = inspect_adapter(directory)
-                results.append({**metadata, **details, "name": directory.name})
+                results.append({**metadata, **details, "name": directory.name, "source": "library"})
             except (OSError, ValueError, TypeError):
                 continue
+        if self.output_root is not None and self.output_root.exists():
+            for directory in sorted(self.output_root.iterdir()):
+                if not directory.is_dir() or directory.name.startswith("."):
+                    continue
+                # Only adapter-style outputs; merged full models are skipped
+                # before the (potentially large) directory scan.
+                if not (directory / "adapter_config.json").is_file():
+                    continue
+                try:
+                    details = inspect_adapter(directory)
+                except (OSError, ValueError, TypeError):
+                    continue
+                results.append({**details, "name": directory.name, "source": "outputs"})
         return results
 
     def get_task(self) -> dict | None:
@@ -381,11 +397,15 @@ class LoRAManager:
         output_dir: Path,
         models_dir: Path | None = None,
         hf_token: str | None = None,
+        source: str = "library",
     ) -> LoRATask:
         name = self.validate_name(name)
         output_name = self.validate_name(output_name)
-        directory = (self.root / name).resolve()
-        if directory.parent != self.root.resolve() or not directory.is_dir():
+        adapter_root = self.output_root if source == "outputs" else self.root
+        if adapter_root is None:
+            raise ValueError("此部署不支援 outputs 來源的 adapter")
+        directory = (adapter_root / name).resolve()
+        if directory.parent != adapter_root.resolve() or not directory.is_dir():
             raise ValueError("找不到 LoRA")
         details = inspect_adapter(directory)
         if details["format"] != "safetensors":
@@ -426,7 +446,9 @@ class LoRAManager:
             self._check_merge_disk_space(base, output_dir)
         task = self._new_task("merge", name, base_model=base_output, output_name=output_name)
         threading.Thread(
-            target=self._merge, args=(task.id, base, output_dir, hf_repo, hf_token), daemon=True
+            target=self._merge,
+            args=(task.id, directory, base, output_dir, hf_repo, hf_token),
+            daemon=True,
         ).start()
         return task
 
@@ -445,6 +467,7 @@ class LoRAManager:
     def _merge(
         self,
         task_id: str,
+        adapter_dir: Path,
         base: Path | None,
         output_dir: Path,
         hf_repo: str | None = None,
@@ -483,7 +506,7 @@ class LoRAManager:
             command = [
                 sys.executable, "-u", "-m", "app.lora_merge",
                 "--base", str(base),
-                "--adapter", str(self.root / task.lora_name),
+                "--adapter", str(adapter_dir),
                 "--output", str(staging),
             ]
             self._log(task, f"執行：{shlex.join(command)}")

@@ -142,27 +142,29 @@ async function refreshOutputs() {
 }
 
 function renderLoras() {
-  $('#loraCount').textContent = state.loras.length;
-  $('#loraLibraryCount').textContent = state.loras.length;
+  // Downloaded adapters live in the library; adapter-style heretic outputs are
+  // offered only in the merge picker (they are managed from the jobs page).
+  const library = state.loras.filter((item) => item.source !== 'outputs');
+  $('#loraCount').textContent = library.length;
+  $('#loraLibraryCount').textContent = library.length;
   const select = $('#loraSelect');
   const previous = select.value;
-  if (!state.loras.length) {
+  if (!library.length) {
     $('#loraLibrary').innerHTML = '<div class="empty-state">尚無 LoRA</div>';
     select.innerHTML = '<option value="">尚無 LoRA</option>';
-    $('#mergeLoraSelect').innerHTML = '<option value="">尚無 LoRA</option>';
-    return;
+  } else {
+    select.innerHTML = '<option value="">選擇 LoRA</option>' + library.map((item) =>
+      `<option value="${escapeHtml(item.name)}">${escapeHtml(item.name)} · ${escapeHtml(item.format)}</option>`
+    ).join('');
+    if (library.some((item) => item.name === previous)) select.value = previous;
+    $('#loraLibrary').innerHTML = library.map((item) => `
+      <article class="model-card">
+        <div class="model-icon">⧉</div>
+        <div class="model-copy"><strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong><small>${formatBytes(item.size)} · ${escapeHtml(item.format)} · ${escapeHtml(item.base_model || item.repo_id || 'base model 未知')}</small>${item.ollama_adapter_supported === false ? '<small class="merge-hint">此架構需先合併</small>' : ''}</div>
+        <button class="model-delete" data-delete-lora="${escapeHtml(item.name)}" title="刪除 LoRA" aria-label="刪除 LoRA">×</button>
+      </article>`).join('');
+    document.querySelectorAll('[data-delete-lora]').forEach((button) => button.addEventListener('click', () => deleteLora(button.dataset.deleteLora)));
   }
-  select.innerHTML = '<option value="">選擇 LoRA</option>' + state.loras.map((item) =>
-    `<option value="${escapeHtml(item.name)}">${escapeHtml(item.name)} · ${escapeHtml(item.format)}</option>`
-  ).join('');
-  if (state.loras.some((item) => item.name === previous)) select.value = previous;
-  $('#loraLibrary').innerHTML = state.loras.map((item) => `
-    <article class="model-card">
-      <div class="model-icon">⧉</div>
-      <div class="model-copy"><strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong><small>${formatBytes(item.size)} · ${escapeHtml(item.format)} · ${escapeHtml(item.base_model || item.repo_id || 'base model 未知')}</small>${item.ollama_adapter_supported === false ? '<small class="merge-hint">此架構需先合併</small>' : ''}</div>
-      <button class="model-delete" data-delete-lora="${escapeHtml(item.name)}" title="刪除 LoRA" aria-label="刪除 LoRA">×</button>
-    </article>`).join('');
-  document.querySelectorAll('[data-delete-lora]').forEach((button) => button.addEventListener('click', () => deleteLora(button.dataset.deleteLora)));
   renderMergeForm();
   updateLoraImportHint();
 }
@@ -173,7 +175,7 @@ function renderMergeForm() {
   const mergeable = state.loras.filter((item) => item.format === 'safetensors');
   mergeSelect.innerHTML = mergeable.length
     ? '<option value="">選擇 LoRA</option>' + mergeable.map((item) =>
-        `<option value="${escapeHtml(item.name)}">${escapeHtml(item.name)}</option>`
+        `<option value="${escapeHtml(item.name)}" data-source="${escapeHtml(item.source || 'library')}">${escapeHtml(item.name)}${item.source === 'outputs' ? '（outputs）' : ''}</option>`
       ).join('')
     : '<option value="">尚無 Safetensors LoRA</option>';
   if (mergeable.some((item) => item.name === previous)) mergeSelect.value = previous;
@@ -184,7 +186,11 @@ function renderMergeForm() {
 }
 
 function applyMergeSuggestion() {
-  const lora = state.loras.find((item) => item.name === $('#mergeLoraSelect').value);
+  const mergeSelect = $('#mergeLoraSelect');
+  const selectedSource = mergeSelect.selectedOptions[0]?.dataset.source || 'library';
+  const lora = state.loras.find(
+    (item) => item.name === mergeSelect.value && (item.source || 'library') === selectedSource
+  );
   const help = $('#mergeBaseHelp');
   if (!lora) { help.textContent = '會自動比對 adapter 的 base_model 建議基底；也可輸入 /models 路徑或 Hugging Face model ID（會自動下載至快取）。'; return; }
   const baseInput = $('#mergeBaseSelect');
@@ -737,6 +743,7 @@ $('#loraImportForm').addEventListener('submit', async (event) => {
 $('#loraMergeForm').addEventListener('submit', async (event) => {
   event.preventDefault(); const button = $('#loraMergeButton'); button.disabled = true;
   const values = Object.fromEntries(new FormData(event.target));
+  values.lora_source = $('#mergeLoraSelect').selectedOptions[0]?.dataset.source || 'library';
   try {
     await api('/api/loras/merge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) });
     $('#loraTaskPanel').hidden = false; await refreshLoraTask(); toast('LoRA 合併已開始');

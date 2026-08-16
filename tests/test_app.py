@@ -2001,3 +2001,65 @@ def test_reexport_jobs_queue_and_start_sequentially(tmp_path: Path, monkeypatch)
     manager._start_next_queued()
     time.sleep(0.2)
     assert ran == [created[0].id, created[1].id]
+
+
+def test_lora_manager_lists_and_merges_outputs_adapters(tmp_path: Path, monkeypatch):
+    data = tmp_path / "data"
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    exported = outputs / "model-heretic-abc123-t159"
+    exported.mkdir()
+    (exported / "adapter_config.json").write_text(
+        json.dumps({"base_model_name_or_path": "org/base"})
+    )
+    (exported / "adapter_model.safetensors").write_bytes(b"w")
+    # A merged full model in outputs must not appear as an adapter.
+    full = outputs / "full-model"
+    full.mkdir()
+    (full / "model.safetensors").write_bytes(b"weights")
+    (full / "config.json").write_text("{}")
+    base = outputs / "base-model"
+    base.mkdir()
+    (base / "model.safetensors").write_bytes(b"weights")
+    (base / "config.json").write_text("{}")
+
+    manager = LoRAManager(data, outputs)
+    entries = manager.list()
+    assert [(entry["name"], entry["source"]) for entry in entries] == [
+        ("model-heretic-abc123-t159", "outputs")
+    ]
+    assert entries[0]["base_model"] == "org/base"
+    assert entries[0]["format"] == "safetensors"
+
+    captured = {}
+
+    class FakeProcess:
+        def __init__(self, command, **_kwargs):
+            captured["adapter"] = command[command.index("--adapter") + 1]
+            staging = Path(command[command.index("--output") + 1])
+            staging.mkdir(parents=True)
+            (staging / "model.safetensors").write_bytes(b"merged")
+            (staging / "config.json").write_text("{}")
+            self.stdout = iter(["ok\n"])
+            self.returncode = 0
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr("app.lora_manager.subprocess.Popen", FakeProcess)
+    manager.start_merge(
+        "model-heretic-abc123-t159", "base-model", "merged-out", outputs, source="outputs"
+    )
+    for _ in range(100):
+        if manager.current.status in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    assert manager.current.status == "completed", manager.current.error
+    assert captured["adapter"] == str(exported)
+    assert (outputs / "merged-out" / "model.safetensors").read_bytes() == b"merged"
+
+    # The library source must not resolve into the outputs directory.
+    with pytest.raises(ValueError):
+        manager.start_merge(
+            "model-heretic-abc123-t159", "base-model", "merged-two", outputs
+        )

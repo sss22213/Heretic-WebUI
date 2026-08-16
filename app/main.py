@@ -286,6 +286,7 @@ class LoRAMergeRequest(BaseModel):
     # ":" is accepted so Ollama-style tags reach start_merge's explanatory error.
     base_output: str = Field(min_length=1, max_length=500, pattern=r"^[a-zA-Z0-9._/:-]+$")
     output_name: str = Field(min_length=1, max_length=120, pattern=r"^[a-zA-Z0-9._-]+$")
+    lora_source: Literal["library", "outputs"] = "library"
 
 
 class LoRAImportRequest(BaseModel):
@@ -957,7 +958,7 @@ class JobManager:
 
 manager = JobManager()
 ollama_manager = OllamaImportManager(OUTPUT_DIR, DATA_DIR)
-lora_manager = LoRAManager(DATA_DIR)
+lora_manager = LoRAManager(DATA_DIR, OUTPUT_DIR)
 eval_manager = EvalManager(DATA_DIR, OUTPUT_DIR, MODELS_DIR)
 heretic_version_managers = {
     "master": HereticVersionManager(
@@ -1228,6 +1229,7 @@ def merge_lora(request: LoRAMergeRequest):
             lora_manager.start_merge(
                 request.lora_name, request.base_output, request.output_name,
                 OUTPUT_DIR, MODELS_DIR, hf_token_store.get(),
+                source=request.lora_source,
             )
         )
     except ValueError as exc:
