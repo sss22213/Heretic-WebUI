@@ -141,6 +141,11 @@ class JobRequest(BaseModel):
     use_ara_lora: bool = False
     ara_lora_rank: int = Field(default=128, ge=1, le=1024)
     use_piqa: bool = False
+    # Set on re-export jobs only: reuse the source job's checkpoint and export
+    # the Pareto-front entry at reexport_front_index instead of index 0.
+    reexport_source: str | None = Field(default=None, pattern=r"^[a-f0-9]{12}$")
+    reexport_front_index: int | None = Field(default=None, ge=0, le=4999)
+    reexport_trial_number: int | None = Field(default=None, ge=1, le=100000)
     system_prompt: str = Field(default="You are a helpful assistant.", max_length=4000)
     good_dataset: str = Field(default="mlabonne/harmless_alpaca", min_length=1, max_length=300)
     good_split: str = Field(default="train[:400]", min_length=1, max_length=100)
@@ -339,6 +344,19 @@ class HereticVersionActionRequest(BaseModel):
     channel: Literal["master", "ara"] = "master"
 
 
+class TrialExportRequest(BaseModel):
+    front_indices: list[int] = Field(min_length=1, max_length=20)
+
+    @field_validator("front_indices")
+    @classmethod
+    def unique_and_bounded(cls, value: list[int]) -> list[int]:
+        if len(set(value)) != len(value):
+            raise ValueError("front_indices 不可重複")
+        if any(index < 0 or index > 4999 for index in value):
+            raise ValueError("front index 超出範圍")
+        return value
+
+
 class SettingsStore:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -386,7 +404,53 @@ def toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def parse_ara_trials(log_text: str) -> dict:
+    """Parse per-trial scores from an ara job log and build the Pareto front.
+
+    Mirrors upstream's selection exactly (completed trials sorted by refusals
+    then KL, keeping strictly improving KL), so a front entry's position is the
+    trial_index the managed patch will select on re-export.
+    """
+    trials: list[dict] = []
+    current: dict | None = None
+    total = 0
+    for line in log_text.splitlines():
+        match = re.search(r"Running trial (\d+) of (\d+)", line)
+        if match:
+            current = {"trial": int(match.group(1))}
+            total = int(match.group(2))
+            continue
+        if current is None:
+            continue
+        match = re.search(r"KL divergence: ([0-9.]+)", line)
+        if match:
+            current["kl"] = float(match.group(1))
+            continue
+        match = re.search(r"Refusals: (\d+)/(\d+)", line)
+        if match:
+            current["refusals"] = int(match.group(1))
+            current["denominator"] = int(match.group(2))
+            if "kl" in current:
+                trials.append(current)
+            current = None
+    front: list[dict] = []
+    best_kl = float("inf")
+    for trial in sorted(trials, key=lambda t: (t["refusals"], t["kl"])):
+        if trial["kl"] < best_kl:
+            best_kl = trial["kl"]
+            front.append(trial)
+    for position, trial in enumerate(front):
+        trial["front_index"] = position
+    return {"completed": len(trials), "total": total, "front": front}
+
+
 def render_config(request: JobRequest, output_directory: Path, job_id: str) -> str:
+    # Re-export jobs point at the source job's checkpoint and pick a specific
+    # Pareto-front entry; normal jobs get their own checkpoint and entry 0.
+    checkpoint_owner = request.reexport_source or job_id
+    trial_index = (
+        request.reexport_front_index if request.reexport_front_index is not None else 0
+    )
     values = {
         "model": request.model,
         "quantization": request.quantization,
@@ -400,11 +464,11 @@ def render_config(request: JobRequest, output_directory: Path, job_id: str) -> s
         "full_normalization_lora_rank": request.lora_rank,
         "n_trials": request.n_trials,
         "n_startup_trials": request.n_startup_trials,
-        "study_checkpoint_dir": str(CHECKPOINT_DIR / job_id),
+        "study_checkpoint_dir": str(CHECKPOINT_DIR / checkpoint_owner),
         "max_shard_size": request.max_shard_size,
         "export_strategy": request.export_strategy,
         "checkpoint_action": "continue",
-        "trial_index": 0,
+        "trial_index": trial_index,
         "model_action": "save",
         "save_directory": str(output_directory),
         "system_prompt": request.system_prompt,
@@ -577,6 +641,9 @@ class JobManager:
         # Per-job copies stay in memory and are removed as soon as the worker
         # starts. Persistence is handled only by the private HFTokenStore file.
         self.job_tokens: dict[str, str] = {}
+        # Jobs that already own a worker thread; queued jobs not in here are
+        # picked up one at a time as running jobs finish.
+        self.started: set[str] = set()
         self._load_jobs()
 
     def _job_dir(self, job_id: str) -> Path:
@@ -649,34 +716,81 @@ class JobManager:
         with self.lock:
             if any(job.status in ("queued", "running") for job in self.jobs.values()):
                 raise RuntimeError("GPU 正由另一個任務使用中")
-            if request.hf_token:
-                hf_token_store.save(request.hf_token)
-            job_id = uuid.uuid4().hex[:12]
-            runtime = heretic_version_managers[request.heretic_channel].runtime_info()
-            output_name = safe_slug(request.output_name or f"{request.model.split('/')[-1]}-heretic")
-            output_directory = OUTPUT_DIR / f"{output_name}-{job_id[:6]}"
-            job = Job(
-                id=job_id,
-                status="queued",
-                request=request.model_dump(),
-                output_directory=str(output_directory),
-                created_at=utc_now(),
-                command=[HERETIC_BIN],
-                heretic_slot=runtime["slot"],
-                heretic_commit=runtime["commit"],
-                heretic_channel=request.heretic_channel,
-            )
-            job_dir = self._job_dir(job_id)
-            job_dir.mkdir(parents=True)
-            (job_dir / "config.toml").write_text(
-                render_config(request, output_directory, job_id), encoding="utf-8"
-            )
-            self.jobs[job.id] = job
-            if request.hf_token:
-                self.job_tokens[job.id] = request.hf_token
-            self._persist(job)
+            return self._create_locked(request, start=True)
+
+    def create_reexports(self, source: Job, selections: list[dict]) -> list[Job]:
+        """Queue one export job per selected Pareto-front entry.
+
+        The first job starts immediately; the rest run one at a time as each
+        finishes (each re-export needs the GPU for a full model load).
+        """
+        with self.lock:
+            if any(job.status in ("queued", "running") for job in self.jobs.values()):
+                raise RuntimeError("GPU 正由另一個任務使用中")
+            base_name = Path(source.output_directory).name
+            created = []
+            for position, selection in enumerate(selections):
+                request = JobRequest.model_validate(
+                    {
+                        **source.request,
+                        "output_name": f"{base_name}-t{selection['trial']}",
+                        "reexport_source": source.id,
+                        "reexport_front_index": selection["front_index"],
+                        "reexport_trial_number": selection["trial"],
+                    }
+                )
+                created.append(self._create_locked(request, start=position == 0))
+            return created
+
+    def _create_locked(self, request: JobRequest, start: bool) -> Job:
+        if request.hf_token:
+            hf_token_store.save(request.hf_token)
+        job_id = uuid.uuid4().hex[:12]
+        runtime = heretic_version_managers[request.heretic_channel].runtime_info()
+        output_name = safe_slug(request.output_name or f"{request.model.split('/')[-1]}-heretic")
+        output_directory = OUTPUT_DIR / f"{output_name}-{job_id[:6]}"
+        job = Job(
+            id=job_id,
+            status="queued",
+            request=request.model_dump(),
+            output_directory=str(output_directory),
+            created_at=utc_now(),
+            command=[HERETIC_BIN],
+            heretic_slot=runtime["slot"],
+            heretic_commit=runtime["commit"],
+            heretic_channel=request.heretic_channel,
+        )
+        job_dir = self._job_dir(job_id)
+        job_dir.mkdir(parents=True)
+        (job_dir / "config.toml").write_text(
+            render_config(request, output_directory, job_id), encoding="utf-8"
+        )
+        self.jobs[job.id] = job
+        if request.hf_token:
+            self.job_tokens[job.id] = request.hf_token
+        self._persist(job)
+        if start:
+            self.started.add(job.id)
             threading.Thread(target=self._run, args=(job.id,), daemon=True).start()
-            return job
+        return job
+
+    def _start_next_queued(self) -> None:
+        with self.lock:
+            if any(job.status == "running" for job in self.jobs.values()):
+                return
+            pending = sorted(
+                (
+                    job
+                    for job in self.jobs.values()
+                    if job.status == "queued" and job.id not in self.started
+                ),
+                key=lambda job: job.created_at,
+            )
+            if not pending:
+                return
+            job = pending[0]
+            self.started.add(job.id)
+            threading.Thread(target=self._run, args=(job.id,), daemon=True).start()
 
     def _run(self, job_id: str) -> None:
         job_dir = self._job_dir(job_id)
@@ -725,6 +839,15 @@ class JobManager:
                         job.error = "Heretic 雖正常結束，但未產生完整的模型權重，請重試任務。"
                     elif exit_code != 0:
                         job.error = f"Heretic 結束碼：{exit_code}"
+                    expected_trial = job.request.get("reexport_trial_number")
+                    if job.status == "completed" and expected_trial and not self._log_confirms_trial(
+                        log_path, expected_trial
+                    ):
+                        job.status = "failed"
+                        job.error = (
+                            f"匯出的 trial 與要求不符（預期 trial {expected_trial}）。"
+                            "請先在「Heretic 版本」頁更新 ara slot 套用最新 patch，再重新匯出。"
+                        )
                 job.exit_code = exit_code
         except Exception as exc:
             with self.lock:
@@ -737,6 +860,7 @@ class JobManager:
                 job.finished_at = utc_now()
                 job.log_size = log_path.stat().st_size if log_path.exists() else 0
                 self._persist(job)
+            self._start_next_queued()
 
     def cancel(self, job_id: str) -> Job:
         with self.lock:
@@ -791,8 +915,32 @@ class JobManager:
             with log_path.open("a", encoding="utf-8") as log:
                 log.write(f"\n--- {utc_now()}：重試任務（沿用現有 checkpoint）---\n")
 
+            self.started.add(job.id)
             threading.Thread(target=self._run, args=(job.id,), daemon=True).start()
             return job
+
+    def log_text(self, job_id: str) -> str:
+        self.get(job_id)
+        path = self._job_dir(job_id) / "run.log"
+        try:
+            return path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+
+    def _log_confirms_trial(self, log_path: Path, trial_number: int) -> bool:
+        """Whether the log shows Heretic restored the requested trial.
+
+        Guards against an ara slot that predates the patch which keeps the
+        invocation's trial_index over the checkpoint-stored one — that slot
+        would silently export front entry 0 instead.
+        """
+        try:
+            with log_path.open("rb") as handle:
+                handle.seek(max(log_path.stat().st_size - 262144, 0))
+                tail = handle.read().decode("utf-8", errors="replace")
+        except OSError:
+            return False
+        return f"Restoring model from trial {trial_number}..." in tail
 
     def log(self, job_id: str, offset: int) -> tuple[str, int]:
         self.get(job_id)
@@ -1243,3 +1391,45 @@ def retry_job(job_id: str):
         raise HTTPException(status_code=404, detail="找不到任務") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def ara_job_or_error(job_id: str) -> Job:
+    try:
+        job = manager.get(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="找不到任務") from exc
+    if (job.heretic_channel or "master") != "ara":
+        raise HTTPException(status_code=400, detail="trial 匯出目前僅支援 ARA 任務")
+    return job
+
+
+@app.get("/api/jobs/{job_id}/trials")
+def get_job_trials(job_id: str):
+    job = ara_job_or_error(job_id)
+    data = parse_ara_trials(manager.log_text(job_id))
+    data["exportable"] = (
+        job.status == "completed" and (CHECKPOINT_DIR / job_id).is_dir()
+    )
+    return data
+
+
+@app.post("/api/jobs/{job_id}/reexport", status_code=202)
+def create_job_reexport(job_id: str, request: TrialExportRequest):
+    job = ara_job_or_error(job_id)
+    if job.status != "completed":
+        raise HTTPException(status_code=409, detail="只有已完成的任務可以重新匯出")
+    if not (CHECKPOINT_DIR / job_id).is_dir():
+        raise HTTPException(status_code=409, detail="此任務的 checkpoint 已不存在，無法重新匯出")
+    active_eval = eval_manager.active()
+    if active_eval is not None and active_eval.uses_local_gpu():
+        raise HTTPException(status_code=409, detail="評測執行中，GPU 使用中，請稍後再試")
+    front = parse_ara_trials(manager.log_text(job_id))["front"]
+    invalid = [index for index in request.front_indices if index >= len(front)]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"front index 超出範圍：{invalid}")
+    selections = [front[index] for index in sorted(request.front_indices)]
+    try:
+        jobs = manager.create_reexports(job, selections)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"jobs": [asdict(created) for created in jobs]}

@@ -100,7 +100,7 @@ function renderJobs() {
   list.innerHTML = state.jobs.map((job) => `
     <button class="job-item ${job.id === state.selectedId ? 'active' : ''}" data-id="${escapeHtml(job.id)}">
       <div class="job-item-top"><strong>${escapeHtml(job.request.model)}</strong><span class="status-badge ${job.status}">${escapeHtml(statusLabel(job.status))}</span></div>
-      <small>${formatTime(job.created_at)} · ${job.request.n_trials} trials${job.heretic_channel === 'ara' ? ' · ARA' : ''}</small>
+      <small>${formatTime(job.created_at)} · ${job.request.n_trials} trials${job.heretic_channel === 'ara' ? ' · ARA' : ''}${job.request.reexport_trial_number ? ` · 匯出 t${job.request.reexport_trial_number}` : ''}</small>
     </button>`).join('');
   list.querySelectorAll('.job-item').forEach((item) => item.addEventListener('click', () => selectJob(item.dataset.id)));
 }
@@ -519,6 +519,9 @@ function updateSelected() {
   $('#jobMeta').textContent = `${job.id} · ${hereticVersion} · ${job.output_directory}`;
   $('#cancelButton').hidden = !['queued', 'running'].includes(job.status);
   $('#retryButton').hidden = job.status !== 'failed';
+  $('#exportTrialsButton').hidden = !(
+    job.status === 'completed' && job.heretic_channel === 'ara' && !job.request.reexport_source
+  );
 }
 
 async function pollLog() {
@@ -651,6 +654,43 @@ function syncAraToggles() {
 $('#araUseAra').addEventListener('change', syncAraToggles);
 $('#araUseAraLora').addEventListener('change', syncAraToggles);
 syncAraToggles();
+async function openTrialsModal() {
+  const job = state.jobs.find((entry) => entry.id === state.selectedId);
+  if (!job) return;
+  try {
+    const data = await api(`/api/jobs/${job.id}/trials`);
+    const front = data.front || [];
+    if (!front.length) { toast('日誌中找不到 trial 結果'); return; }
+    if (!data.exportable) { toast('此任務的 checkpoint 已不存在，無法重新匯出'); return; }
+    $('#trialList').innerHTML = front.map((trial) => `
+      <label class="trial-option"><input type="checkbox" value="${trial.front_index}">
+        <span>Trial ${trial.trial}</span><code>拒答 ${trial.refusals}/${trial.denominator} · KL ${trial.kl.toFixed(4)}</code>${trial.front_index === 0 ? '<small>（原始匯出）</small>' : ''}
+      </label>`).join('');
+    $('#trialsConfirm').disabled = true;
+    $('#trialList').querySelectorAll('input').forEach((box) => box.addEventListener('change', () => {
+      $('#trialsConfirm').disabled = !$('#trialList').querySelector('input:checked');
+    }));
+    $('#trialsModal').hidden = false;
+  } catch (error) { toast(error.message); }
+}
+$('#exportTrialsButton').addEventListener('click', openTrialsModal);
+$('#trialsCancel').addEventListener('click', () => { $('#trialsModal').hidden = true; });
+$('#trialsModal').addEventListener('click', (event) => { if (event.target.id === 'trialsModal') $('#trialsModal').hidden = true; });
+document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !$('#trialsModal').hidden) $('#trialsModal').hidden = true; });
+$('#trialsConfirm').addEventListener('click', async () => {
+  const selected = Array.from($('#trialList').querySelectorAll('input:checked')).map((box) => Number(box.value));
+  if (!selected.length) return;
+  const button = $('#trialsConfirm'); button.disabled = true;
+  try {
+    const result = await api(`/api/jobs/${state.selectedId}/reexport`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ front_indices: selected }),
+    });
+    $('#trialsModal').hidden = true;
+    toast(`已排入 ${result.jobs.length} 個匯出任務，將依序執行`);
+    await refreshJobs();
+  } catch (error) { toast(error.message); button.disabled = false; }
+});
 $('#cancelButton').addEventListener('click', async () => {
   if (!state.selectedId || !window.confirm(t('confirmCancel'))) return;
   try { await api(`/api/jobs/${state.selectedId}/cancel`, { method: 'POST' }); await refreshJobs(); toast(t('cancelSent')); }

@@ -18,9 +18,11 @@ from app.main import (
     OllamaHFImportRequest,
     OllamaImportRequest,
     SettingsStore,
+    TrialExportRequest,
     UISettingsRequest,
     job_environment,
     output_artifacts_complete,
+    parse_ara_trials,
     prompt_source,
     render_config,
     resolve_dataset_configs,
@@ -1758,6 +1760,9 @@ def test_ara_patch_present_and_targets_expected_files():
     # resolved-dataset feature depends on; the patch must backport it.
     assert "a/src/heretic/utils.py" in text
     assert "os.path.isfile" in text
+    # Trial re-export needs the invocation's automation keys to survive the
+    # checkpoint-settings restore.
+    assert "setattr(restored" in text
 
 
 def test_version_manager_tracks_configured_branch(tmp_path: Path):
@@ -1875,3 +1880,124 @@ def test_basic_auth_guard_blocks_and_admits(monkeypatch):
 
     monkeypatch.setattr(main_module, "APP_BASIC_AUTH", "")
     assert client.get("/api/settings").status_code == 200
+
+
+def test_parse_ara_trials_builds_pareto_front():
+    log = """
+* Initial refusals: 96/100
+
+Running trial 1 of 4...
+  * KL divergence: 0.0370
+  * Refusals: 92/100
+Running trial 2 of 4...
+  * KL divergence: 0.2000
+  * Refusals: 2/100
+Running trial 3 of 4...
+  * KL divergence: 0.3500
+  * Refusals: 0/100
+Running trial 4 of 4...
+  * KL divergence: 15.0
+  * Refusals: 0/100
+Running trial 5 of 4...
+  * KL divergence: 0.5
+"""
+    data = parse_ara_trials(log)
+    assert data["completed"] == 4
+    assert data["total"] == 4
+    front = data["front"]
+    # Fewest refusals first, then strictly improving KL; the dominated
+    # trial 4 (same refusals as 3 but far worse KL) is excluded, as is the
+    # truncated trial 5.
+    assert [trial["trial"] for trial in front] == [3, 2, 1]
+    assert [trial["front_index"] for trial in front] == [0, 1, 2]
+    assert front[0]["refusals"] == 0 and front[0]["kl"] == 0.35
+
+
+def test_render_config_reexport_uses_source_checkpoint_and_front_index(tmp_path: Path):
+    request = JobRequest(
+        model="org/m", heretic_channel="ara", use_ara_lora=True,
+        export_strategy="adapter", reexport_source="abcdefabcdef",
+        reexport_front_index=3, reexport_trial_number=159,
+    )
+    parsed = tomllib.loads(render_config(request, tmp_path / "out", "123456789012"))
+    assert parsed["trial_index"] == 3
+    assert parsed["study_checkpoint_dir"].endswith("abcdefabcdef")
+
+    plain = JobRequest(model="org/m")
+    parsed = tomllib.loads(render_config(plain, tmp_path / "out", "123456789012"))
+    assert parsed["trial_index"] == 0
+    assert parsed["study_checkpoint_dir"].endswith("123456789012")
+
+
+def test_trial_export_request_validation():
+    assert TrialExportRequest(front_indices=[0, 2, 1]).front_indices == [0, 2, 1]
+    with pytest.raises(ValidationError):
+        TrialExportRequest(front_indices=[])
+    with pytest.raises(ValidationError):
+        TrialExportRequest(front_indices=[1, 1])
+    with pytest.raises(ValidationError):
+        TrialExportRequest(front_indices=[-1])
+
+
+def test_reexport_jobs_queue_and_start_sequentially(tmp_path: Path, monkeypatch):
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "JOBS_DIR", tmp_path / "jobs")
+    monkeypatch.setattr(main_module, "OUTPUT_DIR", tmp_path / "outputs")
+    monkeypatch.setattr(main_module, "CHECKPOINT_DIR", tmp_path / "checkpoints")
+    (tmp_path / "jobs").mkdir()
+
+    class FakeVersionManager:
+        def runtime_info(self, slot=None):
+            return {"slot": "A", "commit": "deadbeef", "path": str(tmp_path)}
+
+    monkeypatch.setattr(
+        main_module, "heretic_version_managers",
+        {"master": FakeVersionManager(), "ara": FakeVersionManager()},
+    )
+    ran = []
+    monkeypatch.setattr(main_module.JobManager, "_run", lambda self, job_id: ran.append(job_id))
+
+    manager = main_module.JobManager()
+    source_request = main_module.JobRequest(
+        model="org/model", heretic_channel="ara",
+        use_ara_lora=True, export_strategy="adapter",
+    )
+    source = main_module.Job(
+        id="a" * 12, status="completed", request=source_request.model_dump(),
+        output_directory=str(tmp_path / "outputs" / "model-heretic-aaaaaa"),
+        created_at=main_module.utc_now(), heretic_channel="ara",
+    )
+    manager.jobs[source.id] = source
+
+    selections = [
+        {"front_index": 0, "trial": 162, "refusals": 0, "denominator": 100, "kl": 0.35},
+        {"front_index": 1, "trial": 159, "refusals": 2, "denominator": 100, "kl": 0.20},
+    ]
+    created = manager.create_reexports(source, selections)
+    assert len(created) == 2
+    time.sleep(0.2)
+
+    # Only the first export owns a worker; the second waits its turn.
+    assert ran == [created[0].id]
+    assert created[1].id not in manager.started
+    assert created[0].request["reexport_front_index"] == 0
+    assert created[1].request["reexport_trial_number"] == 159
+    assert Path(created[1].output_directory).name.startswith("model-heretic-aaaaaa-t159")
+
+    second_config = tomllib.loads(
+        (tmp_path / "jobs" / created[1].id / "config.toml").read_text(encoding="utf-8")
+    )
+    assert second_config["trial_index"] == 1
+    assert second_config["study_checkpoint_dir"].endswith(source.id)
+
+    # While exports are queued, nothing else may claim the GPU.
+    with pytest.raises(RuntimeError):
+        manager.create_reexports(source, selections)
+    with pytest.raises(RuntimeError):
+        manager.create(source_request)
+
+    # The drain picks up the waiting export exactly once.
+    manager._start_next_queued()
+    time.sleep(0.2)
+    assert ran == [created[0].id, created[1].id]

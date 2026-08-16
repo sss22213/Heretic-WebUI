@@ -52,7 +52,7 @@ index b5bdb6b..080cd2c 100644
          default=[
              BenchmarkSpecification(
 diff --git a/src/heretic/main.py b/src/heretic/main.py
-index b633484..79b3594 100644
+index b633484..16a0311 100644
 --- a/src/heretic/main.py
 +++ b/src/heretic/main.py
 @@ -76,6 +76,9 @@ def obtain_merge_strategy(settings: Settings) -> str | None:
@@ -65,7 +65,7 @@ index b633484..79b3594 100644
      if settings.quantization == QuantizationMethod.BNB_4BIT:
          print()
          print(
-@@ -320,8 +323,11 @@ def run():
+@@ -320,13 +323,29 @@ def run():
              )
          )
  
@@ -78,8 +78,27 @@ index b633484..79b3594 100644
 +            choice = prompt_select("How would you like to proceed?", choices)
  
          if choice == "continue":
-             settings = Settings.model_validate_json(
-@@ -772,8 +778,11 @@ def run():
+-            settings = Settings.model_validate_json(
++            restored = Settings.model_validate_json(
+                 existing_study.user_attrs["settings"]
+             )
++            # The automation keys describe what THIS invocation should do with
++            # the study (which trial to export, where to save it); the values
++            # stored in the checkpoint must not override them.
++            for field in (
++                "checkpoint_action",
++                "trial_index",
++                "model_action",
++                "save_directory",
++                "export_strategy",
++                "max_shard_size",
++            ):
++                setattr(restored, field, getattr(settings, field))
++            settings = restored
+         elif choice == "restart":
+             os.unlink(study_checkpoint_file)
+             backend = JournalFileBackend(study_checkpoint_file, lock_obj=lock_obj)
+@@ -772,8 +791,11 @@ def run():
          )
  
          while True:
@@ -93,7 +112,7 @@ index b633484..79b3594 100644
  
              if trial == "continue":
                  while True:
-@@ -851,17 +860,22 @@ def run():
+@@ -851,17 +873,22 @@ def run():
                  )
  
              while True:
@@ -127,7 +146,7 @@ index b633484..79b3594 100644
  
                  if action is None or action == "Return to the trial selection menu":
                      break
-@@ -872,7 +886,10 @@ def run():
+@@ -872,7 +899,10 @@ def run():
                  try:
                      match action:
                          case "Save the model to a local folder":
@@ -139,7 +158,7 @@ index b633484..79b3594 100644
                              if not save_directory:
                                  continue
  
-@@ -890,7 +907,10 @@ def run():
+@@ -890,7 +920,10 @@ def run():
                                  else:
                                      print("Saving merged model...")
                                      merged_model = model.get_merged_model()
@@ -151,7 +170,7 @@ index b633484..79b3594 100644
                                  del merged_model
                                  empty_cache()
                                  model.tokenizer.save_pretrained(save_directory)
-@@ -1148,6 +1168,11 @@ def run():
+@@ -1148,6 +1181,11 @@ def run():
                  except Exception as error:
                      print(f"[red]Error: {error}[/]")
  

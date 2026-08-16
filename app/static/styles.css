@@ -169,6 +169,12 @@ details[open] .chevron { transform: rotate(180deg); }
 .modal p { margin: 10px 0 16px; color: var(--ink-subtle); font-size: 13px; }
 .modal code { display: block; padding: 10px 12px; overflow: hidden; color: var(--ink-muted); background: var(--canvas); border: 1px solid var(--hairline); border-radius: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .modal-actions { margin-top: 24px; display: flex; justify-content: flex-end; gap: 8px; }
+.trials-modal { width: min(520px, 100%); }
+.trial-list { max-height: 300px; margin-top: 4px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.trial-option { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--hairline); border-radius: 8px; cursor: pointer; font-size: 13px; color: var(--ink); }
+.trial-option:hover { background: var(--surface-3); }
+.trial-option code { display: inline; padding: 0; border: 0; background: none; color: var(--ink-muted); white-space: nowrap; overflow: visible; }
+.trial-option small { color: var(--ink-subtle); }
 .toast { position: fixed; z-index: 60; right: 24px; bottom: 24px; max-width: 380px; padding: 11px 14px; color: var(--ink); background: var(--surface-3); border: 1px solid var(--hairline-strong); border-radius: 8px; opacity: 0; transform: translateY(10px); pointer-events: none; transition: .2s; }
 .toast.show { opacity: 1; transform: translateY(0); }
 

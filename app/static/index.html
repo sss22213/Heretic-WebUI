@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Heretic WebUI</title>
   <meta name="description" content="Heretic model abliteration workspace">
-  <link rel="stylesheet" href="/static/styles.css?v=20260816-3">
+  <link rel="stylesheet" href="/static/styles.css?v=20260817-1">
 </head>
 <body>
   <header class="topbar">
@@ -175,7 +175,7 @@
         <div class="job-layout">
           <div class="job-list" id="jobList"><div class="empty-state" data-i18n="noJobs">尚無任務</div></div>
           <div class="console-panel">
-            <div class="console-header"><div><span class="status-badge idle" id="selectedStatus" data-i18n="notSelected">未選擇</span><strong id="selectedTitle" data-i18n="executionLog">執行日誌</strong></div><div class="console-actions"><button class="secondary" id="retryButton" hidden data-i18n="retry">重試</button><button class="danger" id="cancelButton" hidden data-i18n="cancel">取消</button></div></div>
+            <div class="console-header"><div><span class="status-badge idle" id="selectedStatus" data-i18n="notSelected">未選擇</span><strong id="selectedTitle" data-i18n="executionLog">執行日誌</strong></div><div class="console-actions"><button class="secondary" id="exportTrialsButton" hidden>選擇 trial 匯出</button><button class="secondary" id="retryButton" hidden data-i18n="retry">重試</button><button class="danger" id="cancelButton" hidden data-i18n="cancel">取消</button></div></div>
             <pre id="console" data-i18n="selectJob">選擇左側任務以查看詳細輸出。</pre>
             <div class="console-footer"><span id="jobMeta">—</span><span id="logPosition">0 bytes</span></div>
           </div>
@@ -364,8 +364,16 @@
       <div class="modal-actions"><button class="secondary" id="deleteCancel" data-i18n="keepModel">保留模型</button><button class="danger solid" id="deleteConfirm" data-i18n="deletePermanently">永久刪除</button></div>
     </div>
   </div>
+  <div class="modal-backdrop" id="trialsModal" hidden>
+    <div class="modal trials-modal" role="dialog" aria-modal="true" aria-labelledby="trialsModalTitle">
+      <h2 id="trialsModalTitle">選擇要匯出的 trial</h2>
+      <p>清單為此任務的 Pareto front（拒答與 KL divergence 的最優組合）。每個勾選會排成一個匯出任務依序執行，各需重新載入模型與計算（約 20–30 分鐘）。</p>
+      <div class="trial-list" id="trialList"></div>
+      <div class="modal-actions"><button class="secondary" id="trialsCancel">取消</button><button class="primary" id="trialsConfirm" disabled>匯出所選</button></div>
+    </div>
+  </div>
   <div class="toast" id="toast" role="status"></div>
-  <script src="/static/i18n.js?v=20260816-3"></script>
-  <script src="/static/app.js?v=20260816-3"></script>
+  <script src="/static/i18n.js?v=20260817-1"></script>
+  <script src="/static/app.js?v=20260817-1"></script>
 </body>
 </html>
