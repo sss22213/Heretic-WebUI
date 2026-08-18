@@ -1,5 +1,5 @@
 diff --git a/src/heretic/config.py b/src/heretic/config.py
-index 080cd2c..6eca4ca 100644
+index b5bdb6b..7081926 100644
 --- a/src/heretic/config.py
 +++ b/src/heretic/config.py
 @@ -142,6 +142,16 @@ class Settings(BaseSettings):
@@ -20,12 +20,12 @@ index 080cd2c..6eca4ca 100644
          default=False,
          description="Whether to print prompt/response pairs when counting refusals.",
 diff --git a/src/heretic/model.py b/src/heretic/model.py
-index 5313038..613a874 100644
+index fd525d6..9569a0e 100644
 --- a/src/heretic/model.py
 +++ b/src/heretic/model.py
-@@ -786,6 +786,16 @@ class Model:
-                     for step in range(5):
-                         optimizer.step(closure)
+@@ -797,6 +797,16 @@ class Model:
+                     # parameters during optimization (see ara_abliterate for details).
+                     optimizer.zero_grad(set_to_none=True)
  
 +    @property
 +    def chat_template_kwargs(self) -> dict[str, Any]:
@@ -40,7 +40,7 @@ index 5313038..613a874 100644
      def generate(
          self,
          prompts: list[Prompt],
-@@ -807,6 +817,7 @@ class Model:
+@@ -818,6 +828,7 @@ class Model:
                  chats,
                  add_generation_prompt=True,
                  tokenize=False,

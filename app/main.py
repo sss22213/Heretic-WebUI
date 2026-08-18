@@ -67,8 +67,10 @@ HERETIC_ARA_SLOTS_DIR = DATA_DIR / "heretic_slots_ara"
 HERETIC_ARA_PATCH_DIR = Path(
     os.getenv("HERETIC_ARA_PATCH_DIR", ROOT / "patches" / "heretic-ara")
 ).resolve()
+# edc3b12 frees the optimizer's gradient buffers before evaluation; without it
+# a trial can hold tens of GiB of VRAM and force a much smaller batch size.
 HERETIC_ARA_INITIAL_REF = os.getenv(
-    "HERETIC_ARA_INITIAL_REF", "25979ad7d0b4a763c03d3a464594820b73ab5c7a"
+    "HERETIC_ARA_INITIAL_REF", "edc3b123456c7f86f24d409b838ab3a7226e285e"
 )
 HERETIC_BIN = os.getenv("HERETIC_BIN", "heretic")
 # "user:password"; when set, every route except /api/health requires HTTP
