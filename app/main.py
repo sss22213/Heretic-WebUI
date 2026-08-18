@@ -1380,13 +1380,22 @@ def merge_lora(request: LoRAMergeRequest):
 
 
 @app.delete("/api/loras/{lora_name}")
-def delete_lora(lora_name: str):
+def delete_lora(lora_name: str, source: str = "library"):
+    if source not in ("library", "outputs"):
+        raise HTTPException(status_code=400, detail="無效的 LoRA 來源")
+    # An adapter in outputs is a heretic job artifact, so the running job keeps
+    # its claim on it and the job card has to learn that it is gone.
+    if source == "outputs" and manager.output_in_use(lora_name):
+        raise HTTPException(status_code=409, detail="此 adapter 正由 Heretic 任務使用，無法刪除")
     try:
-        return lora_manager.delete(lora_name)
+        result = lora_manager.delete(lora_name, source=source)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if source == "outputs":
+        manager.mark_output_deleted(lora_name)
+    return result
 
 
 @app.get("/api/evals")

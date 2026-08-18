@@ -297,18 +297,23 @@ class LoRAManager:
                 task.finished_at = utc_now()
                 self._log(task, f"錯誤：{exc}")
 
-    def delete(self, name: str) -> dict:
+    def delete(self, name: str, source: str = "library") -> dict:
         name = self.validate_name(name)
+        root = self.output_root if source == "outputs" else self.root
+        if root is None:
+            raise ValueError("此部署不支援 outputs 來源的 adapter")
         with self.lock:
             if self.current and self.current.status in ("queued", "running") and self.current.lora_name == name:
                 raise RuntimeError("此 LoRA 正在使用中，無法刪除")
-            directory = (self.root / name).resolve()
-            if directory.parent != self.root.resolve() or not directory.is_dir():
+            directory = (root / name).resolve()
+            if directory.parent != root.resolve() or not directory.is_dir():
                 raise ValueError("找不到 LoRA")
+            # Refuse anything that is not an adapter, so a merged full model in
+            # outputs can never be removed through the LoRA page.
             inspect_adapter(directory)
             size = sum(path.stat().st_size for path in directory.rglob("*") if path.is_file())
             shutil.rmtree(directory)
-            return {"name": name, "deleted_bytes": size}
+            return {"name": name, "deleted_bytes": size, "source": source}
 
     def start_import(self, name: str, model_name: str, base_model: str, base_url: str) -> LoRATask:
         name = self.validate_name(name)

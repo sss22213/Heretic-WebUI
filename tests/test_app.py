@@ -687,6 +687,39 @@ def test_lora_manager_lists_and_deletes_adapter(tmp_path: Path):
     assert not directory.exists()
 
 
+def test_lora_manager_deletes_adapter_style_outputs(tmp_path: Path):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    manager = LoRAManager(tmp_path / "data", outputs)
+    adapter = outputs / "model-heretic-abc123"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}")
+    (adapter / "adapter_model.safetensors").write_bytes(b"weights")
+    merged = outputs / "model-merged"
+    merged.mkdir()
+    (merged / "model.safetensors").write_bytes(b"weights")
+
+    listed = {item["name"]: item["source"] for item in manager.list()}
+    assert listed == {"model-heretic-abc123": "outputs"}
+    # A merged full model in outputs is not an adapter and stays untouchable.
+    with pytest.raises(ValueError, match="adapter"):
+        manager.delete("model-merged", source="outputs")
+    assert merged.exists()
+    with pytest.raises(ValueError, match="找不到 LoRA"):
+        manager.delete("model-heretic-abc123")
+
+    result = manager.delete("model-heretic-abc123", source="outputs")
+    assert result["deleted_bytes"] > 0 and result["source"] == "outputs"
+    assert not adapter.exists()
+
+
+def test_lora_manager_rejects_outputs_delete_without_output_root(tmp_path: Path):
+    manager = LoRAManager(tmp_path / "data")
+
+    with pytest.raises(ValueError, match="不支援"):
+        manager.delete("anything", source="outputs")
+
+
 def test_lora_manager_blocks_active_delete_and_path_traversal(tmp_path: Path):
     manager = LoRAManager(tmp_path / "data")
     directory = manager.root / "example"
@@ -1958,6 +1991,49 @@ def test_basic_auth_guard_blocks_and_admits(monkeypatch):
 
     monkeypatch.setattr(main_module, "APP_BASIC_AUTH", "")
     assert client.get("/api/settings").status_code == 200
+
+
+def test_delete_lora_endpoint_handles_outputs_adapters(tmp_path: Path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import app.main as main_module
+
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    adapter = outputs / "model-heretic-abc123"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}")
+    (adapter / "adapter_model.safetensors").write_bytes(b"weights")
+
+    class FakeJobs:
+        def __init__(self) -> None:
+            self.in_use = True
+            self.deleted: list[str] = []
+
+        def output_in_use(self, name: str) -> bool:
+            return self.in_use
+
+        def mark_output_deleted(self, name: str) -> None:
+            self.deleted.append(name)
+
+    jobs = FakeJobs()
+    monkeypatch.setattr(main_module, "lora_manager", LoRAManager(tmp_path / "data", outputs))
+    monkeypatch.setattr(main_module, "manager", jobs)
+    client = TestClient(main_module.app)
+
+    assert client.delete("/api/loras/x?source=elsewhere").status_code == 400
+    assert client.delete("/api/loras/model-heretic-abc123?source=outputs").status_code == 409
+    assert adapter.exists()
+
+    jobs.in_use = False
+    # Without the source the library root is searched, so the adapter survives.
+    assert client.delete("/api/loras/model-heretic-abc123").status_code == 404
+    assert adapter.exists()
+
+    response = client.delete("/api/loras/model-heretic-abc123?source=outputs")
+    assert response.status_code == 200 and response.json()["deleted_bytes"] > 0
+    assert not adapter.exists()
+    assert jobs.deleted == ["model-heretic-abc123"]
 
 
 def test_parse_ara_trials_builds_pareto_front():

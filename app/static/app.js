@@ -142,28 +142,30 @@ async function refreshOutputs() {
 }
 
 function renderLoras() {
-  // Downloaded adapters live in the library; adapter-style heretic outputs are
-  // offered only in the merge picker (they are managed from the jobs page).
+  // Adapter-style heretic outputs are listed and deletable like downloaded
+  // ones, but stay out of the Ollama import picker: import reads the library.
   const library = state.loras.filter((item) => item.source !== 'outputs');
-  $('#loraCount').textContent = library.length;
-  $('#loraLibraryCount').textContent = library.length;
+  $('#loraCount').textContent = state.loras.length;
+  $('#loraLibraryCount').textContent = state.loras.length;
   const select = $('#loraSelect');
   const previous = select.value;
-  if (!library.length) {
+  select.innerHTML = library.length
+    ? '<option value="">選擇 LoRA</option>' + library.map((item) =>
+        `<option value="${escapeHtml(item.name)}">${escapeHtml(item.name)} · ${escapeHtml(item.format)}</option>`
+      ).join('')
+    : '<option value="">尚無 LoRA</option>';
+  if (library.some((item) => item.name === previous)) select.value = previous;
+  if (!state.loras.length) {
     $('#loraLibrary').innerHTML = '<div class="empty-state">尚無 LoRA</div>';
-    select.innerHTML = '<option value="">尚無 LoRA</option>';
   } else {
-    select.innerHTML = '<option value="">選擇 LoRA</option>' + library.map((item) =>
-      `<option value="${escapeHtml(item.name)}">${escapeHtml(item.name)} · ${escapeHtml(item.format)}</option>`
-    ).join('');
-    if (library.some((item) => item.name === previous)) select.value = previous;
-    $('#loraLibrary').innerHTML = library.map((item) => `
+    $('#loraLibrary').innerHTML = state.loras.map((item) => `
       <article class="model-card">
         <div class="model-icon">⧉</div>
-        <div class="model-copy"><strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong><small>${formatBytes(item.size)} · ${escapeHtml(item.format)} · ${escapeHtml(item.base_model || item.repo_id || 'base model 未知')}</small>${item.ollama_adapter_supported === false ? '<small class="merge-hint">此架構需先合併</small>' : ''}</div>
-        <button class="model-delete" data-delete-lora="${escapeHtml(item.name)}" title="刪除 LoRA" aria-label="刪除 LoRA">×</button>
+        <div class="model-copy"><strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong><small>${formatBytes(item.size)} · ${escapeHtml(item.format)} · ${escapeHtml(item.base_model || item.repo_id || 'base model 未知')}</small>${item.source === 'outputs' ? `<small class="merge-hint">${escapeHtml(t('loraFromOutputs'))}</small>` : ''}${item.ollama_adapter_supported === false ? '<small class="merge-hint">此架構需先合併</small>' : ''}</div>
+        <button class="model-delete" data-delete-lora="${escapeHtml(item.name)}" data-lora-source="${escapeHtml(item.source || 'library')}" title="刪除 LoRA" aria-label="刪除 LoRA">×</button>
       </article>`).join('');
-    document.querySelectorAll('[data-delete-lora]').forEach((button) => button.addEventListener('click', () => deleteLora(button.dataset.deleteLora)));
+    document.querySelectorAll('[data-delete-lora]').forEach((button) =>
+      button.addEventListener('click', () => deleteLora(button.dataset.deleteLora, button.dataset.loraSource)));
   }
   renderMergeForm();
   updateLoraImportHint();
@@ -224,11 +226,15 @@ async function refreshLoras() {
   catch (error) { toast(`LoRA 清單更新失敗：${error?.message || error}`); }
 }
 
-async function deleteLora(name) {
-  if (!window.confirm(`確定永久刪除 LoRA「${name}」？`)) return;
+async function deleteLora(name, source = 'library') {
+  const outputs = source === 'outputs';
+  if (!window.confirm(outputs ? t('confirmDeleteOutputLora').replace('{name}', name) : `確定永久刪除 LoRA「${name}」？`)) return;
   try {
-    const result = await api(`/api/loras/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    const query = outputs ? '?source=outputs' : '';
+    const result = await api(`/api/loras/${encodeURIComponent(name)}${query}`, { method: 'DELETE' });
     await refreshLoras();
+    // The adapter was a job artifact, so the job card now has to show it gone.
+    if (outputs) await refreshJobs();
     toast(`已刪除 ${name}，釋放 ${formatBytes(result.deleted_bytes)}。`);
   } catch (error) { toast(error?.message || error); }
 }
