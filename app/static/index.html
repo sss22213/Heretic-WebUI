@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Heretic WebUI</title>
   <meta name="description" content="Heretic model abliteration workspace">
-  <link rel="stylesheet" href="/static/styles.css?v=20260817-3">
+  <link rel="stylesheet" href="/static/styles.css?v=20260819-1">
 </head>
 <body>
   <header class="topbar">
@@ -94,6 +94,12 @@
               <label class="field"><span>Split</span><input name="bad_split" id="badSplit" value="train[:400]"></label>
               <label class="field"><span>Column</span><input name="bad_column" id="badColumn" value="text"></label>
               <small class="details-hint span-4" id="badDatasetHint" hidden></small>
+              <label class="toggle-field span-4"><input type="checkbox" name="eval_follows_direction" checked><span class="toggle"></span><span><strong data-i18n="evalFollowsDirection">評測沿用上面的資料集</strong><small data-i18n="evalFollowsDirectionHint">關閉的話 Heretic 會改用它內建的英文評測題；資料集語言不一致時，最佳化可以靠「換一種語言回答」把拒絕率刷到 0</small></span></label>
+              <label class="field"><span data-i18n="goodEvalSplit">Harmless 評測 split</span><input name="good_eval_split" value="train[400:500]"></label>
+              <label class="field"><span data-i18n="badEvalSplit">Harmful 評測 split</span><input name="bad_eval_split" value="train[400:500]"></label>
+              <small class="details-hint span-4" data-i18n="evalSplitHint">評測用的區間要和上面的方向 split 不重疊；用 config 的資料集必須是同一個 split 名稱的不同區間。</small>
+              <label class="toggle-field span-4"><input type="checkbox" name="include_cjk_refusal_markers" checked><span class="toggle"></span><span><strong data-i18n="cjkMarkers">加入中文拒絕詞</strong><small data-i18n="cjkMarkersHint">Heretic 內建的拒絕詞只有英文，模型用中文拒絕會被算成「沒有拒絕」</small></span></label>
+              <label class="toggle-field span-4"><input type="checkbox" name="disable_thinking" checked><span class="toggle"></span><span><strong data-i18n="disableThinking">評測時關閉思考</strong><small data-i18n="disableThinkingHint">思考模型的回應從推理區塊開始，不關的話評分看到的是思考開頭而不是真正的答案</small></span></label>
               <label class="field span-4"><span>System prompt</span><textarea name="system_prompt" rows="3">You are a helpful assistant.</textarea></label>
             </div>
           </details>
@@ -162,6 +168,12 @@
               <label class="field"><span>Split</span><input name="bad_split" id="araBadSplit" value="train[:400]"></label>
               <label class="field"><span>Column</span><input name="bad_column" id="araBadColumn" value="text"></label>
               <small class="details-hint span-4" id="araBadDatasetHint" hidden></small>
+              <label class="toggle-field span-4"><input type="checkbox" name="eval_follows_direction" checked><span class="toggle"></span><span><strong data-i18n="evalFollowsDirection">評測沿用上面的資料集</strong><small data-i18n="evalFollowsDirectionHint">關閉的話 Heretic 會改用它內建的英文評測題；資料集語言不一致時，最佳化可以靠「換一種語言回答」把拒絕率刷到 0</small></span></label>
+              <label class="field"><span data-i18n="goodEvalSplit">Harmless 評測 split</span><input name="good_eval_split" value="train[400:500]"></label>
+              <label class="field"><span data-i18n="badEvalSplit">Harmful 評測 split</span><input name="bad_eval_split" value="train[400:500]"></label>
+              <small class="details-hint span-4" data-i18n="evalSplitHint">評測用的區間要和上面的方向 split 不重疊；用 config 的資料集必須是同一個 split 名稱的不同區間。</small>
+              <label class="toggle-field span-4"><input type="checkbox" name="include_cjk_refusal_markers" checked><span class="toggle"></span><span><strong data-i18n="cjkMarkers">加入中文拒絕詞</strong><small data-i18n="cjkMarkersHint">Heretic 內建的拒絕詞只有英文，模型用中文拒絕會被算成「沒有拒絕」</small></span></label>
+              <label class="toggle-field span-4"><input type="checkbox" name="disable_thinking" checked><span class="toggle"></span><span><strong data-i18n="disableThinking">評測時關閉思考</strong><small data-i18n="disableThinkingHint">思考模型的回應從推理區塊開始，不關的話評分看到的是思考開頭而不是真正的答案</small></span></label>
               <label class="field span-4"><span>System prompt</span><textarea name="system_prompt" rows="3">You are a helpful assistant.</textarea></label>
             </div>
           </details>
@@ -373,7 +385,7 @@
     </div>
   </div>
   <div class="toast" id="toast" role="status"></div>
-  <script src="/static/i18n.js?v=20260817-3"></script>
-  <script src="/static/app.js?v=20260817-3"></script>
+  <script src="/static/i18n.js?v=20260819-1"></script>
+  <script src="/static/app.js?v=20260819-1"></script>
 </body>
 </html>

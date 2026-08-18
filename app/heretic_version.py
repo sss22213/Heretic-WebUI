@@ -255,6 +255,10 @@ class HereticVersionManager:
         self._save_state(state)
         return state
 
+    def expected_patches_signature(self) -> str:
+        """Signature the active slot would have if rebuilt from the repo patches."""
+        return self._patches_signature()
+
     def runtime_info(self, slot: str | None = None) -> dict:
         with self.lock:
             state = self._bootstrap()

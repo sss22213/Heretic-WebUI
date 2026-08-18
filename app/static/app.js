@@ -549,7 +549,8 @@ function formPayload(form) {
   ['n_trials', 'n_startup_trials', 'max_response_length', 'batch_size', 'max_batch_size', 'lora_rank'].forEach((key) => { values[key] = Number(values[key]); });
   if (form.elements.offload_outputs_to_cpu) values.offload_outputs_to_cpu = form.elements.offload_outputs_to_cpu.checked;
   values.orthogonalize_direction = form.elements.orthogonalize_direction.checked;
-  ['use_ara', 'use_ara_lora', 'use_piqa'].forEach((key) => { if (form.elements[key]) values[key] = form.elements[key].checked; });
+  ['use_ara', 'use_ara_lora', 'use_piqa', 'eval_follows_direction', 'include_cjk_refusal_markers', 'disable_thinking']
+    .forEach((key) => { if (form.elements[key]) values[key] = form.elements[key].checked; });
   if (form.elements.ara_lora_rank) values.ara_lora_rank = Number(form.elements.ara_lora_rank.value);
   if (!values.output_name) delete values.output_name;
   if (!values.hf_token) delete values.hf_token;

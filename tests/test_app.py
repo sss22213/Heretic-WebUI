@@ -8,6 +8,7 @@ import tomllib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.main import (
@@ -133,6 +134,59 @@ def test_render_config_with_config_points_at_resolved_local_file():
     assert good["column"] == "text"
     # The other side has no config, so it is untouched.
     assert parsed["bad_prompts"]["dataset"] == "mlabonne/harmful_behaviors"
+
+
+def test_render_config_evaluates_on_the_direction_datasets():
+    request = JobRequest(
+        model="org/m", heretic_channel="ara",
+        good_dataset="wangzhang/abliterix-datasets", good_config="good_1000",
+        good_split="train[:400]", good_column="prompt", good_eval_split="train[400:500]",
+        bad_dataset="wangzhang/abliterix-datasets", bad_config="harmful_1000",
+        bad_split="train[:400]", bad_column="prompt", bad_eval_split="train[500:600]",
+    )
+    parsed = tomllib.loads(render_config(request, Path("/tmp/o"), "abc123"))
+
+    # Evaluation reads the same files as the directions, on a held-out range.
+    assert parsed["good_evaluation_prompts"]["dataset"] == parsed["good_prompts"]["dataset"]
+    assert parsed["bad_evaluation_prompts"]["dataset"] == parsed["bad_prompts"]["dataset"]
+    assert parsed["good_evaluation_prompts"]["split"] == "train[400:500]"
+    assert parsed["bad_evaluation_prompts"]["split"] == "train[500:600]"
+    # Chinese prompts need Chinese markers, or every refusal scores as a pass.
+    assert "抱歉" in parsed["refusal_markers"] and "i cannot" in parsed["refusal_markers"]
+    assert parsed["disable_thinking"] is True
+
+
+def test_render_config_master_channel_targets_scorer_plugins():
+    request = JobRequest(model="org/m", good_eval_split="test[:100]", bad_eval_split="test[:100]")
+    parsed = tomllib.loads(render_config(request, Path("/tmp/o"), "abc123"))
+
+    # On master the evaluation prompts and markers belong to the scorer plugins.
+    assert parsed["scorer"]["KLDivergence"]["prompts"]["dataset"] == "mlabonne/harmless_alpaca"
+    assert parsed["scorer"]["KeywordRate"]["prompts"]["dataset"] == "mlabonne/harmful_behaviors"
+    assert "抱歉" in parsed["scorer"]["KeywordRate"]["keyword_markers"]
+    assert "refusal_markers" not in parsed
+
+
+def test_render_config_can_fall_back_to_upstream_evaluation_defaults():
+    request = JobRequest(
+        model="org/m", heretic_channel="ara",
+        eval_follows_direction=False, include_cjk_refusal_markers=False,
+    )
+    parsed = tomllib.loads(render_config(request, Path("/tmp/o"), "abc123"))
+    assert "good_evaluation_prompts" not in parsed
+    assert "refusal_markers" not in parsed
+
+
+def test_job_request_rejects_eval_split_from_another_split_of_a_resolved_config():
+    # Only the direction splits get materialized, so a "test" evaluation split
+    # would point config.toml at a file the resolver never wrote.
+    with pytest.raises(ValidationError):
+        JobRequest(
+            model="org/m", good_dataset="org/ds", good_config="good_1000",
+            good_split="train[:400]", good_eval_split="test[:100]",
+        )
+    # Without a config the dataset is loaded by id, so any split is fine.
+    JobRequest(model="org/m", good_split="train[:400]", good_eval_split="test[:100]")
 
 
 def test_resolved_prompt_path_is_deterministic_and_selection_specific():
@@ -1772,6 +1826,23 @@ def test_ara_patch_present_and_targets_expected_files():
     assert "Restored adapter snapshot for trial" in text
 
 
+@pytest.mark.parametrize("channel", ["heretic", "heretic-ara"])
+def test_disable_thinking_patch_present_on_both_channels(channel: str):
+    patch = (
+        Path(__file__).resolve().parent.parent
+        / "patches" / channel / "0002-evaluate-without-thinking.patch"
+    )
+    text = patch.read_text(encoding="utf-8")
+    # The setting config.toml writes has to exist, and generate() has to use it;
+    # otherwise scoring keeps reading the opening of the chain of thought.
+    assert "a/src/heretic/config.py" in text
+    assert "disable_thinking: bool" in text
+    assert "a/src/heretic/model.py" in text
+    assert "chat_template_kwargs" in text
+    assert '"enable_thinking": False' in text
+    assert "**self.chat_template_kwargs," in text
+
+
 def test_version_manager_tracks_configured_branch(tmp_path: Path):
     remote = tmp_path / "remote.git"
     seed = tmp_path / "seed"
@@ -1946,6 +2017,36 @@ def test_trial_export_request_validation():
         TrialExportRequest(front_indices=[-1])
 
 
+def test_job_creation_refuses_a_slot_built_from_older_patches(tmp_path: Path, monkeypatch):
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "JOBS_DIR", tmp_path / "jobs")
+    (tmp_path / "jobs").mkdir()
+
+    class StaleVersionManager:
+        def runtime_info(self, slot=None):
+            return {
+                "slot": "A", "commit": "deadbeef", "path": str(tmp_path),
+                "patches_signature": "built-before",
+            }
+
+        def expected_patches_signature(self):
+            return "current"
+
+    monkeypatch.setattr(
+        main_module, "heretic_version_managers",
+        {"master": StaleVersionManager(), "ara": StaleVersionManager()},
+    )
+    manager = main_module.JobManager()
+    # config.toml now carries disable_thinking, which a slot built before the
+    # patch would reject after the model has already loaded.
+    with pytest.raises(HTTPException) as error:
+        manager.create(main_module.JobRequest(model="org/model"))
+    assert error.value.status_code == 409
+    assert "patch" in error.value.detail
+    assert not manager.jobs
+
+
 def test_reexport_jobs_queue_and_start_sequentially(tmp_path: Path, monkeypatch):
     import app.main as main_module
 
@@ -1956,7 +2057,13 @@ def test_reexport_jobs_queue_and_start_sequentially(tmp_path: Path, monkeypatch)
 
     class FakeVersionManager:
         def runtime_info(self, slot=None):
-            return {"slot": "A", "commit": "deadbeef", "path": str(tmp_path)}
+            return {
+                "slot": "A", "commit": "deadbeef", "path": str(tmp_path),
+                "patches_signature": "sig",
+            }
+
+        def expected_patches_signature(self):
+            return "sig"
 
     monkeypatch.setattr(
         main_module, "heretic_version_managers",

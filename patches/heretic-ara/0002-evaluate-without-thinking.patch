@@ -1,0 +1,50 @@
+diff --git a/src/heretic/config.py b/src/heretic/config.py
+index 080cd2c..6eca4ca 100644
+--- a/src/heretic/config.py
++++ b/src/heretic/config.py
+@@ -142,6 +142,16 @@ class Settings(BaseSettings):
+         description="Maximum number of tokens to generate for each response.",
+     )
+ 
++    disable_thinking: bool = Field(
++        default=False,
++        description=(
++            "Whether to pass enable_thinking=False to the chat template when generating "
++            "responses for direction extraction and evaluation. Thinking models otherwise "
++            "start their response inside a reasoning block, so scoring sees the opening of "
++            "the chain of thought instead of the answer. Templates without the flag ignore it."
++        ),
++    )
++
+     print_responses: bool = Field(
+         default=False,
+         description="Whether to print prompt/response pairs when counting refusals.",
+diff --git a/src/heretic/model.py b/src/heretic/model.py
+index 5313038..613a874 100644
+--- a/src/heretic/model.py
++++ b/src/heretic/model.py
+@@ -786,6 +786,16 @@ class Model:
+                     for step in range(5):
+                         optimizer.step(closure)
+ 
++    @property
++    def chat_template_kwargs(self) -> dict[str, Any]:
++        # A thinking model's generation prompt ends inside a reasoning block, so
++        # both the refusal directions and the scores would be derived from the
++        # opening of the chain of thought rather than from the answer. Chat
++        # templates that don't know the flag simply ignore it.
++        if not self.settings.disable_thinking:
++            return {}
++        return {"enable_thinking": False}
++
+     def generate(
+         self,
+         prompts: list[Prompt],
+@@ -807,6 +817,7 @@ class Model:
+                 chats,
+                 add_generation_prompt=True,
+                 tokenize=False,
++                **self.chat_template_kwargs,
+             ),
+         )
+ 
