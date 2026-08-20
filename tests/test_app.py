@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import math
+import re
 import hashlib
 import subprocess
 import threading
@@ -177,6 +178,31 @@ def test_render_config_can_fall_back_to_upstream_evaluation_defaults():
     parsed = tomllib.loads(render_config(request, Path("/tmp/o"), "abc123"))
     assert "good_evaluation_prompts" not in parsed
     assert "refusal_markers" not in parsed
+
+
+@pytest.mark.parametrize(
+    "form_id,channel_only",
+    [
+        ("jobForm", {"ara_lora_rank", "use_ara", "use_ara_lora", "use_piqa"}),
+        ("araJobForm", {"offload_outputs_to_cpu"}),
+    ],
+)
+def test_job_forms_only_name_real_request_fields(form_id: str, channel_only: set[str]):
+    """The "load settings" button matches form controls to request fields by name."""
+    html = (
+        Path(__file__).resolve().parent.parent / "app" / "static" / "index.html"
+    ).read_text(encoding="utf-8")
+    start = html.index(f'<form id="{form_id}"')
+    block = html[start : html.index("</form>", start)]
+    names = set(re.findall(r'name="([a-z_]+)"', block))
+
+    assert not names - set(JobRequest.model_fields)
+    # hf_token is write-only, and these are filled in per job, not carried over.
+    never_loaded = {
+        "hf_token", "heretic_channel", "output_name",
+        "reexport_source", "reexport_front_index", "reexport_trial_number",
+    }
+    assert set(JobRequest.model_fields) - never_loaded - channel_only == names - never_loaded
 
 
 def test_split_range_resolves_only_what_it_can_compare():

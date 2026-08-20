@@ -534,6 +534,8 @@ function updateSelected() {
   $('#exportTrialsButton').hidden = !(
     job.status === 'completed' && job.heretic_channel === 'ara' && !job.request.reexport_source
   );
+  // A re-export request is a handful of trial fields, not a runnable job setup.
+  $('#loadSettingsButton').hidden = Boolean(job.request.reexport_source);
 }
 
 async function pollLog() {
@@ -548,6 +550,36 @@ async function pollLog() {
     }
     state.logOffset = data.next_offset; $('#logPosition').textContent = `${state.logOffset.toLocaleString()} bytes`;
   } catch (_) { /* Next poll reconciles state. */ }
+}
+
+// A job record carries the exact request it ran with, so a finished job can
+// seed the create form instead of being retyped field by field.
+const JOB_FORMS = {
+  master: { view: 'create', form: '#jobForm', sides: ['good', 'bad'] },
+  ara: { view: 'ara', form: '#araJobForm', sides: ['araGood', 'araBad'] },
+};
+// hf_token never leaves the server, and the output name has to stay unique.
+const UNLOADABLE_FIELDS = new Set([
+  'hf_token', 'heretic_channel', 'output_name',
+  'reexport_source', 'reexport_front_index', 'reexport_trial_number',
+]);
+
+function loadJobSettings(job) {
+  const target = JOB_FORMS[job.heretic_channel === 'ara' ? 'ara' : 'master'];
+  const form = $(target.form);
+  Object.entries(job.request).forEach(([key, value]) => {
+    const field = form.elements[key];
+    // Fields the other channel's form doesn't have are simply not its business.
+    if (UNLOADABLE_FIELDS.has(key) || value === undefined || !field) return;
+    if (field.type === 'checkbox') field.checked = Boolean(value);
+    // null means the job left it unset, so clear whatever is in the form now.
+    else field.value = value === null ? '' : value;
+  });
+  showView(target.view);
+  // Setting .value fires no events, so the config datalists need a nudge.
+  target.sides.forEach((side) => detectDatasetConfigs(side));
+  form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  toast(t('settingsLoaded'));
 }
 
 function formPayload(form) {
@@ -694,6 +726,10 @@ async function openTrialsModal() {
   } catch (error) { toast(error.message); }
 }
 $('#exportTrialsButton').addEventListener('click', openTrialsModal);
+$('#loadSettingsButton').addEventListener('click', () => {
+  const job = state.jobs.find((entry) => entry.id === state.selectedId);
+  if (job) loadJobSettings(job);
+});
 $('#trialsCancel').addEventListener('click', () => { $('#trialsModal').hidden = true; });
 $('#trialsModal').addEventListener('click', (event) => { if (event.target.id === 'trialsModal') $('#trialsModal').hidden = true; });
 document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !$('#trialsModal').hidden) $('#trialsModal').hidden = true; });
