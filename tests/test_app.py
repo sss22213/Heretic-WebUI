@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import math
 import hashlib
 import subprocess
 import threading
@@ -29,6 +30,7 @@ from app.main import (
     resolve_dataset_configs,
     resolved_prompt_path,
     safe_slug,
+    split_range,
 )
 from app.dataset_resolver import (
     clean_prompt,
@@ -175,6 +177,45 @@ def test_render_config_can_fall_back_to_upstream_evaluation_defaults():
     parsed = tomllib.loads(render_config(request, Path("/tmp/o"), "abc123"))
     assert "good_evaluation_prompts" not in parsed
     assert "refusal_markers" not in parsed
+
+
+def test_split_range_resolves_only_what_it_can_compare():
+    assert split_range("train") == (0, math.inf)
+    assert split_range("train[:400]") == (0, 400)
+    assert split_range("train[400:500]") == (400, 500)
+    assert split_range("train[500:]") == (500, math.inf)
+    # Percentages, negative indices, and multi-part specs stay Heretic's problem.
+    assert split_range("train[:10%]") is None
+    assert split_range("train[-100:]") is None
+    assert split_range("train[:400]+train[600:]") is None
+
+
+def test_job_request_rejects_empty_split_ranges():
+    base = dict(model="m", good_dataset="/a.txt", bad_dataset="/b.txt")
+
+    # This is the config that reached Heretic and died as
+    # "torch.cat(): expected a non-empty list of Tensors".
+    with pytest.raises(ValidationError, match="空區間"):
+        JobRequest(**base, good_eval_split="train[500:500]")
+    with pytest.raises(ValidationError, match="空區間"):
+        JobRequest(**base, bad_eval_split="train[600:500]")
+    with pytest.raises(ValidationError, match="空區間"):
+        JobRequest(**base, good_split="train[500:500]")
+    # Evaluation fields are not emitted at all when evaluation is upstream's.
+    JobRequest(**base, eval_follows_direction=False, good_eval_split="train[500:500]")
+
+
+def test_job_request_rejects_evaluating_on_the_direction_prompts():
+    base = dict(model="m", good_dataset="/a.txt", bad_dataset="/b.txt")
+
+    with pytest.raises(ValidationError, match="重疊"):
+        JobRequest(**base, good_split="train", bad_split="train")
+    with pytest.raises(ValidationError, match="重疊"):
+        JobRequest(**base, good_split="train[:600]", bad_split="train[:600]")
+    # The defaults are disjoint, and a different split name cannot overlap.
+    JobRequest(**base)
+    JobRequest(**base, good_split="train", good_eval_split="test[:100]",
+               bad_split="train", bad_eval_split="test[:100]")
 
 
 def test_job_request_rejects_eval_split_from_another_split_of_a_resolved_config():

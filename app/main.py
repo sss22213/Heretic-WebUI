@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -96,6 +97,27 @@ def split_name(split: str) -> str:
     return split.split("[")[0] or "train"
 
 
+SPLIT_SLICE = re.compile(r"^(?P<name>[^\[\]]*)(?:\[(?P<start>-?\d*):(?P<stop>-?\d*)\])?$")
+
+
+def split_range(split: str) -> tuple[int, float] | None:
+    """The absolute [start, stop) a split spec selects, or None if unknowable.
+
+    Percentages, negative indices, and multi-part specs are all valid for
+    Heretic but cannot be resolved without the dataset length, so they are
+    left alone rather than guessed at.
+    """
+    match = SPLIT_SLICE.match(split.strip())
+    if match is None:
+        return None
+    start_text, stop_text = match.group("start"), match.group("stop")
+    if start_text is None and stop_text is None:
+        return 0, math.inf
+    if start_text.startswith("-") or stop_text.startswith("-"):
+        return None
+    return int(start_text or 0), float(stop_text) if stop_text else math.inf
+
+
 # Heretic classifies a response as a refusal by substring match against an
 # English-only marker list, so a model answering in Chinese scores zero refusals
 # while refusing every time. The optimizer will find that shortcut on its own
@@ -172,6 +194,14 @@ def prompt_source(dataset: str, split: str, column: str, config: str | None) -> 
     if config:
         return str(resolved_prompt_path(dataset, config, split, column)), split, "text"
     return dataset, split, column
+
+
+def check_split_is_not_empty(label: str, split: str) -> None:
+    bounds = split_range(split)
+    if bounds is not None and bounds[0] >= bounds[1]:
+        raise ValueError(
+            f"{label} split「{split}」是空區間，一題都選不到；請填入起點小於終點的範圍"
+        )
 
 
 class JobRequest(BaseModel):
@@ -289,21 +319,40 @@ class JobRequest(BaseModel):
 
     @model_validator(mode="after")
     def check_evaluation_splits(self):
-        if not self.eval_follows_direction:
-            return self
-        # A config-bearing dataset is materialized to one file per split name,
-        # and only the direction splits get resolved. An evaluation split naming
-        # a different split would point config.toml at a file nobody wrote.
         sides = (
             ("Harmless", self.good_config, self.good_split, self.good_eval_split),
             ("Harmful", self.bad_config, self.bad_split, self.bad_eval_split),
         )
         for label, config, split, eval_split in sides:
+            # An empty range loads zero prompts, and Heretic only notices deep
+            # inside evaluation with "torch.cat(): expected a non-empty list".
+            check_split_is_not_empty(f"{label} 方向", split)
+            if not self.eval_follows_direction:
+                continue
+            check_split_is_not_empty(f"{label} 評測", eval_split)
+            # A config-bearing dataset is materialized to one file per split
+            # name, and only the direction splits get resolved. An evaluation
+            # split naming a different split would point config.toml at a file
+            # nobody wrote.
             if config and split_name(split) != split_name(eval_split):
                 raise ValueError(
                     f"{label} 資料集指定了 config，評測 split 必須與方向 split 同名"
                     f"（{split_name(split)}）；請改用同一個 split 的不同區間，"
                     f"例如 {split_name(split)}[400:500]"
+                )
+            if split_name(split) != split_name(eval_split):
+                continue
+            direction, evaluation = split_range(split), split_range(eval_split)
+            if direction is None or evaluation is None:
+                continue
+            # Scoring on prompts the ablation was fitted to reports a refusal
+            # rate the model has not earned on anything unseen.
+            if evaluation[0] < direction[1] and direction[0] < evaluation[1]:
+                raise ValueError(
+                    f"{label} 評測 split「{eval_split}」與方向 split「{split}」重疊，"
+                    "評分會落在最佳化用過的題目上，拒絕率會偏樂觀。"
+                    f"請改用不重疊的區間，例如方向 {split_name(split)}[:400]、"
+                    f"評測 {split_name(split)}[400:500]"
                 )
         return self
 
