@@ -25,6 +25,7 @@ from app.main import (
     UISettingsRequest,
     job_environment,
     output_artifacts_complete,
+    decode_prefix_escapes,
     parse_ara_trials,
     prompt_source,
     render_config,
@@ -179,6 +180,35 @@ def test_render_config_can_fall_back_to_upstream_evaluation_defaults():
     parsed = tomllib.loads(render_config(request, Path("/tmp/o"), "abc123"))
     assert "good_evaluation_prompts" not in parsed
     assert "refusal_markers" not in parsed
+
+
+def test_response_prefix_decodes_escapes_and_reaches_both_channels():
+    # The form stores backslash-n, heretic needs real newlines in the TOML.
+    for channel in ("master", "ara"):
+        request = JobRequest(
+            model="org/m", heretic_channel=channel,
+            response_prefix=r"\n</think>\n\n",
+        )
+        parsed = tomllib.loads(render_config(request, Path("/tmp/o"), "abc123"))
+        assert parsed["response_prefix"] == "\n</think>\n\n"
+
+
+def test_response_prefix_defaults_to_auto_detection():
+    # An absent key is what makes heretic run its own prefix detection.
+    parsed = tomllib.loads(
+        render_config(JobRequest(model="org/m"), Path("/tmp/o"), "abc123")
+    )
+    assert "response_prefix" not in parsed
+    assert JobRequest(model="org/m", response_prefix="").response_prefix is None
+    with pytest.raises(ValidationError):
+        JobRequest(model="org/m", response_prefix="literal\nnewline")
+
+
+def test_decode_prefix_escapes_keeps_unknown_sequences():
+    assert decode_prefix_escapes(r"\n\t\r") == "\n\t\r"
+    assert decode_prefix_escapes(r"\\n") == r"\n"
+    assert decode_prefix_escapes("no escapes") == "no escapes"
+    assert decode_prefix_escapes("dangling\\") == "dangling\\"
 
 
 @pytest.mark.parametrize(

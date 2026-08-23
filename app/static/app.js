@@ -592,6 +592,7 @@ function formPayload(form) {
   if (form.elements.ara_lora_rank) values.ara_lora_rank = Number(form.elements.ara_lora_rank.value);
   if (!values.output_name) delete values.output_name;
   if (!values.hf_token) delete values.hf_token;
+  if (!values.response_prefix) delete values.response_prefix;
   if (!values.good_config || !values.good_config.trim()) delete values.good_config;
   if (!values.bad_config || !values.bad_config.trim()) delete values.bad_config;
   return values;

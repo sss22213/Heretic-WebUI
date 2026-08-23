@@ -253,6 +253,9 @@ class JobRequest(BaseModel):
     bad_eval_split: str = Field(default="train[400:500]", min_length=1, max_length=100)
     include_cjk_refusal_markers: bool = True
     disable_thinking: bool = True
+    # Kept in escaped single-line form (backslash-n, not a real newline) because
+    # HTML text inputs strip literal newlines; decoded when rendering the config.
+    response_prefix: str | None = Field(default=None, max_length=200)
 
     @field_validator("model", "good_dataset", "bad_dataset")
     @classmethod
@@ -274,6 +277,15 @@ class JobRequest(BaseModel):
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value):
             raise ValueError("無效的 dataset config 名稱")
         return value
+
+    @field_validator("response_prefix")
+    @classmethod
+    def normalize_response_prefix(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if any(ord(char) < 32 for char in value):
+            raise ValueError("回應前綴請用 \\n 表示換行，不可直接包含控制字元")
+        return value or None
 
     @field_validator("hf_token")
     @classmethod
@@ -540,6 +552,25 @@ class Job:
     heretic_channel: str = "master"
 
 
+PREFIX_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\"}
+
+
+def decode_prefix_escapes(value: str) -> str:
+    decoded: list[str] = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "\\" and index + 1 < len(value):
+            mapped = PREFIX_ESCAPES.get(value[index + 1])
+            if mapped is not None:
+                decoded.append(mapped)
+                index += 2
+                continue
+        decoded.append(char)
+        index += 1
+    return "".join(decoded)
+
+
 def toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
@@ -629,6 +660,10 @@ def render_config(request: JobRequest, output_directory: Path, job_id: str) -> s
         "system_prompt": request.system_prompt,
         "disable_thinking": request.disable_thinking,
     }
+    if request.response_prefix:
+        # A configured prefix makes heretic skip its auto-detection entirely;
+        # on the ara channel the setting exists via the managed 0003 patch.
+        values["response_prefix"] = decode_prefix_escapes(request.response_prefix)
     markers = (
         ENGLISH_REFUSAL_MARKERS + CJK_REFUSAL_MARKERS
         if request.include_cjk_refusal_markers
