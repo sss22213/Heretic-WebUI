@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
-from huggingface_hub import HfApi, snapshot_download
+from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 
 
 LLAMA_CPP_DIR = Path(os.getenv("LLAMA_CPP_DIR", "/opt/llama.cpp"))
@@ -134,6 +134,30 @@ def resolve_import_format(requested: str, architectures: list[str]) -> str:
     if requested == "auto":
         return "gguf" if GGUF_REQUIRED_ARCHITECTURES.intersection(architectures) else "safetensors"
     return requested
+
+
+def gguf_file_name_error(name: str) -> str | None:
+    """Why a repo file name is unusable as a direct GGUF import, if it is."""
+    if not name.endswith(".gguf"):
+        return "檔案必須是 .gguf"
+    if "/" in name or "\\" in name or name.startswith("."):
+        return "GGUF 檔名不可包含路徑"
+    # Ollama takes one blob per model, and rejoining a split needs
+    # llama-gguf-split, so point at the single-file quants instead.
+    if re.search(r"-\d{5}-of-\d{5}\.gguf$", name):
+        return "分片的 GGUF 需要先合併，請改選單一檔案的量化版本"
+    return None
+
+
+def list_repo_gguf_files(repo_id: str, revision: str, token: str | None = None) -> list[dict]:
+    """The importable GGUF files in a Hugging Face repo, largest quant last."""
+    info = HfApi().model_info(repo_id, revision=revision, token=token, files_metadata=True)
+    files = [
+        {"name": sibling.rfilename, "size": sibling.size or 0}
+        for sibling in info.siblings or []
+        if gguf_file_name_error(sibling.rfilename) is None
+    ]
+    return sorted(files, key=lambda entry: entry["name"])
 
 
 def conversion_extra_args(source: Path) -> list[str]:
@@ -324,6 +348,7 @@ class OllamaImport:
     artifact_path: str | None = None
     repo_id: str | None = None
     revision: str | None = None
+    gguf_file: str | None = None
 
 
 class OllamaClient:
@@ -606,11 +631,17 @@ class OllamaImportManager:
         import_format: str = "auto",
         keep_intermediate: bool = False,
         hf_token: str | None = None,
+        gguf_file: str | None = None,
     ) -> OllamaImport:
         repo_id = repo_id.strip()
         if not re.fullmatch(r"[\w.-]+/[\w.-]+", repo_id):
             raise ValueError("Hugging Face repo ID 格式應為 organization/repository")
         revision = (revision or "main").strip() or "main"
+        if gguf_file is not None:
+            gguf_file = gguf_file.strip()
+            error = gguf_file_name_error(gguf_file)
+            if error:
+                raise ValueError(error)
         with self.lock:
             if self.current and self.current.status in ("queued", "running"):
                 raise RuntimeError("已有 Ollama 匯入任務正在執行")
@@ -618,7 +649,9 @@ class OllamaImportManager:
             resolve_import_format(import_format, [])
             output_name = repo_id.replace("/", "--")
             directory = self.output_dir / output_name
-            if directory.exists() and not complete_safetensors_directory(directory):
+            # A repo GGUF downloads under .gguf/<name>/ and never creates a
+            # safetensors output, so the completeness rule does not apply.
+            if gguf_file is None and directory.exists() and not complete_safetensors_directory(directory):
                 raise RuntimeError(
                     f"outputs/{output_name} 已存在但不完整，請先在模型清單刪除它再重新下載"
                 )
@@ -628,15 +661,16 @@ class OllamaImportManager:
                 output_name=output_name,
                 model_name=model_name,
                 base_url=base_url.rstrip("/"),
-                quantize=quantize,
+                # A pre-built GGUF is already quantized; there is nothing to re-quantize.
+                quantize=None if gguf_file else quantize,
                 created_at=utc_now(),
                 modelfile=modelfile,
-                import_format=import_format,
-                # Placeholder until the download reveals the architectures.
-                resolved_format="safetensors",
+                import_format="gguf" if gguf_file else import_format,
+                resolved_format="gguf" if gguf_file else "safetensors",
                 keep_intermediate=keep_intermediate,
                 repo_id=repo_id,
                 revision=revision,
+                gguf_file=gguf_file,
             )
             self.current = item
             self._persist(item)
@@ -670,7 +704,31 @@ class OllamaImportManager:
         staging = self.output_dir / f".download-{item.output_name}"
         self._log(item, f"從 Hugging Face 下載：{item.repo_id}@{item.revision}")
 
-        def directory_size(root: Path) -> int:
+        with self._download_progress(item, staging):
+            snapshot_download(
+                repo_id=item.repo_id,
+                revision=item.revision,
+                token=hf_token,
+                local_dir=staging,
+                ignore_patterns=ignore,
+            )
+        if not complete_safetensors_directory(staging):
+            raise RuntimeError(
+                "下載完成但缺少完整的 Safetensors 權重——"
+                "此 repo 可能不是 safetensors 格式的模型（GGUF/pytorch-only repo 不支援）"
+            )
+        shutil.rmtree(staging / ".cache", ignore_errors=True)
+        staging.replace(directory)
+        with self.lock:
+            item.bytes_completed = item.bytes_total
+            self._persist(item)
+        self._log(item, f"下載完成：outputs/{directory.name}")
+
+    @contextmanager
+    def _download_progress(self, item: OllamaImport, root: Path):
+        """Report bytes on disk under root while a download runs."""
+
+        def directory_size() -> int:
             total = 0
             for path in root.rglob("*"):
                 try:
@@ -684,7 +742,7 @@ class OllamaImportManager:
 
         def monitor() -> None:
             while not stop.wait(3):
-                done = directory_size(staging)
+                done = directory_size()
                 with self.lock:
                     item.bytes_completed = min(done, item.bytes_total) if item.bytes_total else done
                     self._persist(item)
@@ -692,27 +750,61 @@ class OllamaImportManager:
         thread = threading.Thread(target=monitor, daemon=True)
         thread.start()
         try:
-            snapshot_download(
-                repo_id=item.repo_id,
-                revision=item.revision,
-                token=hf_token,
-                local_dir=staging,
-                ignore_patterns=ignore,
-            )
+            yield
         finally:
             stop.set()
             thread.join()
-        if not complete_safetensors_directory(staging):
-            raise RuntimeError(
-                "下載完成但缺少完整的 Safetensors 權重——"
-                "此 repo 可能不是 safetensors 格式的模型（GGUF/pytorch-only repo 不支援）"
+
+    def _ensure_repo_gguf(self, item: OllamaImport, hf_token: str | None) -> Path:
+        """Fetch one pre-built GGUF from a repo; nothing to convert or quantize."""
+        assert item.gguf_file is not None
+        directory = self.output_dir / GGUF_OUTPUT_DIR_NAME / item.output_name
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / item.gguf_file
+        if target.is_file() and target.stat().st_size > 0:
+            self._log(item, f"沿用既有 GGUF：{target.name}")
+        else:
+            expected = 0
+            try:
+                for entry in list_repo_gguf_files(item.repo_id, item.revision, hf_token):
+                    if entry["name"] == item.gguf_file:
+                        expected = entry["size"]
+            except Exception:  # noqa: BLE001 - hf_hub_download reports real errors
+                pass
+            free = shutil.disk_usage(directory).free
+            if expected and free < int(expected * 1.05):
+                raise RuntimeError(
+                    f"下載空間不足：{item.gguf_file} 約需 {format_bytes(int(expected * 1.05))}，"
+                    f"目前只有 {format_bytes(free)} 可用。"
+                )
+            with self.lock:
+                item.bytes_total = expected
+                item.bytes_completed = 0
+                self._persist(item)
+            self._set_phase(item, "downloading")
+            self._log(
+                item,
+                f"從 Hugging Face 下載 GGUF：{item.repo_id}@{item.revision} / {item.gguf_file}"
+                + (f"（{format_bytes(expected)}）" if expected else ""),
             )
-        shutil.rmtree(staging / ".cache", ignore_errors=True)
-        staging.replace(directory)
+            with self._download_progress(item, directory):
+                hf_hub_download(
+                    repo_id=item.repo_id,
+                    filename=item.gguf_file,
+                    revision=item.revision,
+                    token=hf_token,
+                    local_dir=directory,
+                )
+            shutil.rmtree(directory / ".cache", ignore_errors=True)
+            if not target.is_file() or target.stat().st_size == 0:
+                raise RuntimeError(f"下載完成但找不到 {item.gguf_file}")
+            self._log(item, f"下載完成：{format_bytes(target.stat().st_size)}")
         with self.lock:
-            item.bytes_completed = item.bytes_total
+            item.artifact_path = str(target)
+            item.bytes_total = target.stat().st_size
+            item.bytes_completed = 0
             self._persist(item)
-        self._log(item, f"下載完成：outputs/{directory.name}")
+        return target
 
     def _set_phase(self, item: OllamaImport, phase: str) -> None:
         with self.lock:
@@ -924,7 +1016,10 @@ class OllamaImportManager:
 
         directory = self.output_dir / item.output_name
         try:
-            if item.repo_id:
+            # A chosen repo GGUF needs no safetensors snapshot and already
+            # knows its format, so the resolve step below must not run: it
+            # would read architectures from a directory that never exists.
+            if item.repo_id and not item.gguf_file:
                 self._ensure_download(item, directory, hf_token)
                 with self.lock:
                     item.resolved_format = resolve_import_format(
@@ -950,7 +1045,10 @@ class OllamaImportManager:
                 digests = self._upload_files(item, client, files, directory)
                 create_quantize = item.quantize
             else:
-                gguf_path = self._ensure_gguf(item, directory)
+                if item.gguf_file:
+                    gguf_path = self._ensure_repo_gguf(item, hf_token)
+                else:
+                    gguf_path = self._ensure_gguf(item, directory)
                 digests = self._upload_files(item, client, [gguf_path])
                 create_quantize = None
 
@@ -969,6 +1067,19 @@ class OllamaImportManager:
             )
             if response.get("status") != "success":
                 raise RuntimeError(f"Ollama 未回報成功：{response}")
+            # Ollama now holds its own blob copy, and nothing in the UI can
+            # delete a repo GGUF later (delete_output wants a safetensors
+            # output), so drop it unless the user asked to keep it for
+            # re-imports. Kept until success so a failed create can retry
+            # without re-downloading.
+            if item.gguf_file and not item.keep_intermediate and item.artifact_path:
+                artifact = Path(item.artifact_path)
+                artifact.unlink(missing_ok=True)
+                try:
+                    artifact.parent.rmdir()
+                except OSError:
+                    pass
+                self._log(item, "已移除下載的 GGUF（勾選「保留」可重複匯入不需重新下載）")
             with self.lock:
                 item.status = "completed"
                 item.phase = "completed"

@@ -46,6 +46,7 @@ from app.ollama_import import (
     complete_safetensors_directory,
     conversion_extra_args,
     gguf_artifact_paths,
+    gguf_file_name_error,
     importable_files,
     llama_cpp_tools,
     model_architectures,
@@ -490,6 +491,140 @@ def test_ollama_hf_import_start_validation(tmp_path: Path):
     )
     with pytest.raises(RuntimeError, match="已有"):
         manager.start_from_hf("org/other", "main", "m:latest", "http://ollama:11434", None, "FROM .")
+
+
+def test_gguf_file_name_error_screens_unusable_names():
+    assert gguf_file_name_error("model-Q4_K_M.gguf") is None
+    assert "gguf" in gguf_file_name_error("model.safetensors")
+    assert "路徑" in gguf_file_name_error("sub/model.gguf")
+    assert "路徑" in gguf_file_name_error(".hidden.gguf")
+    # Ollama takes one blob; a split needs llama-gguf-split first.
+    assert "分片" in gguf_file_name_error("model-00001-of-00002.gguf")
+
+
+def test_ollama_hf_import_accepts_a_repo_gguf_file(tmp_path: Path):
+    manager = OllamaImportManager(tmp_path / "outputs", tmp_path / "data")
+
+    with pytest.raises(ValueError, match="分片"):
+        manager.start_from_hf(
+            "org/model", "main", "m:latest", "http://ollama:11434", None, "FROM .",
+            gguf_file="model-00001-of-00002.gguf",
+        )
+
+    # An incomplete safetensors leftover blocks the snapshot path but is
+    # irrelevant here: the GGUF lands under .gguf/, not outputs/<name>.
+    leftover = tmp_path / "outputs" / "org--model"
+    leftover.mkdir(parents=True)
+    (leftover / "junk.txt").write_text("x")
+    item = manager.start_from_hf(
+        "org/model", "main", "m:latest", "http://ollama:11434", "q4_K_M", "FROM .",
+        gguf_file="model-Q4_K_M.gguf",
+    )
+    assert item.gguf_file == "model-Q4_K_M.gguf"
+    assert item.resolved_format == "gguf"
+    # The file is already quantized; nothing to re-quantize.
+    assert item.quantize is None
+
+
+def test_ollama_hf_import_downloads_a_repo_gguf_directly(tmp_path: Path, monkeypatch):
+    output_root = tmp_path / "outputs"
+    calls = {}
+
+    def fake_hf_hub_download(*, repo_id, filename, revision, token, local_dir):
+        calls.update(repo_id=repo_id, filename=filename, revision=revision, token=token)
+        target = Path(local_dir) / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"GGUF" + b"x" * 64)
+        cache = Path(local_dir) / ".cache" / "huggingface"
+        cache.mkdir(parents=True)
+        (cache / "download.lock").write_text("")
+        return str(target)
+
+    class FakeApi:
+        def model_info(self, *args, **kwargs):
+            raise RuntimeError("offline: the size estimate is optional")
+
+    class FakeClient:
+        def __init__(self, base_url):
+            calls["base_url"] = base_url
+
+        def version(self):
+            return {"version": "0.30.6"}
+
+        def blob_exists(self, _digest):
+            return True
+
+        def create(self, model_name, files, quantize, options):
+            calls.update(model_name=model_name, files=dict(files), quantize=quantize)
+            return {"status": "success"}
+
+    monkeypatch.setattr("app.ollama_import.hf_hub_download", fake_hf_hub_download)
+    monkeypatch.setattr("app.ollama_import.HfApi", FakeApi)
+    monkeypatch.setattr("app.ollama_import.OllamaClient", FakeClient)
+    manager = OllamaImportManager(output_root, tmp_path / "data")
+    item = manager.start_from_hf(
+        "org/model", "main", "model:q4", "http://ollama:11434", None, "FROM .",
+        gguf_file="model-Q4_K_M.gguf",
+    )
+
+    for _ in range(100):
+        if item.status in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+
+    assert item.status == "completed", item.error
+    assert calls["filename"] == "model-Q4_K_M.gguf"
+    assert calls["quantize"] is None
+    assert sorted(calls["files"]) == ["model-Q4_K_M.gguf"]
+    # No safetensors output is created, and without "keep" the downloaded
+    # GGUF is dropped once Ollama holds its own blob copy.
+    assert not (output_root / "org--model").exists()
+    assert not (output_root / ".gguf" / "org--model").exists()
+
+
+def test_ollama_hf_import_keeps_the_repo_gguf_when_asked(tmp_path: Path, monkeypatch):
+    output_root = tmp_path / "outputs"
+
+    def fake_hf_hub_download(*, repo_id, filename, revision, token, local_dir):
+        target = Path(local_dir) / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"GGUF" + b"x" * 64)
+        return str(target)
+
+    class FakeApi:
+        def model_info(self, *args, **kwargs):
+            raise RuntimeError("offline")
+
+    class FakeClient:
+        def __init__(self, base_url):
+            pass
+
+        def version(self):
+            return {"version": "0.30.6"}
+
+        def blob_exists(self, _digest):
+            return True
+
+        def create(self, model_name, files, quantize, options):
+            return {"status": "success"}
+
+    monkeypatch.setattr("app.ollama_import.hf_hub_download", fake_hf_hub_download)
+    monkeypatch.setattr("app.ollama_import.HfApi", FakeApi)
+    monkeypatch.setattr("app.ollama_import.OllamaClient", FakeClient)
+    manager = OllamaImportManager(output_root, tmp_path / "data")
+    item = manager.start_from_hf(
+        "org/model", "main", "model:q4", "http://ollama:11434", None, "FROM .",
+        keep_intermediate=True, gguf_file="model-Q4_K_M.gguf",
+    )
+
+    for _ in range(100):
+        if item.status in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+
+    assert item.status == "completed", item.error
+    kept = output_root / ".gguf" / "org--model" / "model-Q4_K_M.gguf"
+    assert kept.is_file()
 
 
 def test_ollama_hf_import_downloads_then_imports(tmp_path: Path, monkeypatch):

@@ -658,10 +658,49 @@ $('#ollamaSourceMode').addEventListener('change', (event) => {
   $('#ollamaRepoId').disabled = !hf;
   $('#ollamaRepoId').required = hf;
   $('#ollamaRevision').disabled = !hf;
+  $('#ollamaGgufField').hidden = !hf;
+  $('#ollamaGgufSelect').disabled = !hf;
+  updateGgufMode();
 });
+// A repo shipping ready-made GGUF quants can skip the local conversion: the
+// chosen file uploads to Ollama as-is, so quantize/import-path do not apply.
+let ggufFilesRequest = 0;
+function updateGgufMode() {
+  const direct = !$('#ollamaGgufSelect').disabled && Boolean($('#ollamaGgufSelect').value);
+  $('#ollamaQuantize').disabled = direct;
+  $('#ollamaImportFormat').disabled = direct;
+  // Retarget data-i18n so a later language switch keeps the right label.
+  $('#ollamaKeepTitle').dataset.i18n = direct ? 'keepGguf' : 'keepBf16';
+  $('#ollamaKeepHelp').dataset.i18n = direct ? 'keepGgufHelp' : 'keepBf16Help';
+  $('#ollamaKeepTitle').textContent = t($('#ollamaKeepTitle').dataset.i18n);
+  $('#ollamaKeepHelp').textContent = t($('#ollamaKeepHelp').dataset.i18n);
+}
+async function detectRepoGgufFiles() {
+  const repo = $('#ollamaRepoId').value.trim();
+  const select = $('#ollamaGgufSelect');
+  const requestId = ++ggufFilesRequest;
+  const none = `<option value="">${escapeHtml(t('ggufNone'))}</option>`;
+  select.innerHTML = none;
+  $('#ollamaGgufHelp').textContent = t('ggufFileHelp');
+  updateGgufMode();
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return;
+  try {
+    const revision = $('#ollamaRevision').value.trim() || 'main';
+    const data = await api(`/api/hf/gguf/files?repo_id=${encodeURIComponent(repo)}&revision=${encodeURIComponent(revision)}`);
+    if (requestId !== ggufFilesRequest) return;
+    const files = data.files || [];
+    select.innerHTML = none + files.map((file) =>
+      `<option value="${escapeHtml(file.name)}">${escapeHtml(file.name)} · ${formatBytes(file.size)}</option>`
+    ).join('');
+    if (files.length) $('#ollamaGgufHelp').textContent = t('ggufFound', { count: files.length });
+  } catch (_) { /* Listing is a convenience; the Safetensors path still works. */ }
+}
+$('#ollamaGgufSelect').addEventListener('change', updateGgufMode);
+$('#ollamaRevision').addEventListener('change', detectRepoGgufFiles);
 $('#ollamaRepoId').addEventListener('change', (event) => {
   const repo = event.target.value.trim();
   if (repo && !$('#ollamaModelName').value) $('#ollamaModelName').value = (repo.split('/').pop() || '').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
+  detectRepoGgufFiles();
 });
 $('#loraSelect').addEventListener('change', (event) => {
   const item = state.loras.find((entry) => entry.name === event.target.value);
@@ -764,6 +803,7 @@ $('#ollamaForm').addEventListener('submit', async (event) => {
   values.keep_intermediate = event.target.elements.keep_intermediate.checked;
   const hfMode = $('#ollamaSourceMode').value === 'hf';
   if (hfMode && !values.revision) values.revision = 'main';
+  if (!values.gguf_file) delete values.gguf_file;
   try {
     await api(hfMode ? '/api/ollama/import/hf' : '/api/ollama/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) });
     $('#ollamaImportPanel').hidden = false; await refreshOllamaImport(); toast(t('importStarted'));

@@ -37,7 +37,12 @@ from .eval_manager import (
 from .dataset_resolver import list_dataset_configs
 from .heretic_version import HereticVersionManager
 from .lora_manager import LoRAManager, adapter_supported_by_ollama, suggest_merge_base
-from .ollama_import import OllamaClient, OllamaImportManager, ollama_model_name_error
+from .ollama_import import (
+    OllamaClient,
+    OllamaImportManager,
+    list_repo_gguf_files,
+    ollama_model_name_error,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = ROOT / "app" / "static"
@@ -393,6 +398,8 @@ class OllamaImportRequest(OllamaImportOptions):
 class OllamaHFImportRequest(OllamaImportOptions):
     repo_id: str = Field(min_length=3, max_length=200, pattern=r"^[\w.-]+/[\w.-]+$")
     revision: str = Field(default="main", min_length=1, max_length=200)
+    # A file name from the repo selects the ready-made GGUF import path.
+    gguf_file: str | None = Field(default=None, max_length=300)
 
 
 class LoRADownloadRequest(BaseModel):
@@ -1349,6 +1356,7 @@ def create_ollama_hf_import(request: OllamaHFImportRequest):
                 request.import_format,
                 request.keep_intermediate,
                 hf_token_store.get(),
+                request.gguf_file,
             )
         )
     except ValueError as exc:
@@ -1537,6 +1545,20 @@ def get_dataset_configs(repo_id: str = Query(min_length=3, max_length=200)):
         return list_dataset_configs(repo_id, hf_token_store.get())
     except Exception as exc:  # noqa: BLE001 - surface any hub/network error to the UI
         raise HTTPException(status_code=502, detail=f"無法取得 dataset config：{exc}") from exc
+
+
+@app.get("/api/hf/gguf/files")
+def get_repo_gguf_files(
+    repo_id: str = Query(min_length=3, max_length=200),
+    revision: str = Query(default="main", min_length=1, max_length=200),
+):
+    repo_id = repo_id.strip()
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", repo_id):
+        raise HTTPException(status_code=400, detail="Hugging Face repo ID 格式應為 organization/repository")
+    try:
+        return {"files": list_repo_gguf_files(repo_id, revision.strip() or "main", hf_token_store.get())}
+    except Exception as exc:  # noqa: BLE001 - surface any hub/network error to the UI
+        raise HTTPException(status_code=502, detail=f"無法取得 GGUF 檔案清單：{exc}") from exc
 
 
 @app.get("/api/jobs")
