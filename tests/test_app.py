@@ -26,7 +26,7 @@ from app.main import (
     job_environment,
     output_artifacts_complete,
     decode_prefix_escapes,
-    parse_ara_trials,
+    parse_trial_log,
     prompt_source,
     render_config,
     resolve_dataset_configs,
@@ -2268,7 +2268,7 @@ def test_delete_lora_endpoint_handles_outputs_adapters(tmp_path: Path, monkeypat
     assert jobs.deleted == ["model-heretic-abc123"]
 
 
-def test_parse_ara_trials_builds_pareto_front():
+def test_parse_trial_log_builds_pareto_front():
     log = """
 * Initial refusals: 96/100
 
@@ -2287,7 +2287,7 @@ Running trial 4 of 4...
 Running trial 5 of 4...
   * KL divergence: 0.5
 """
-    data = parse_ara_trials(log)
+    data = parse_trial_log(log)
     assert data["completed"] == 4
     assert data["total"] == 4
     front = data["front"]
@@ -2297,6 +2297,36 @@ Running trial 5 of 4...
     assert [trial["trial"] for trial in front] == [3, 2, 1]
     assert [trial["front_index"] for trial in front] == [0, 1, 2]
     assert front[0]["refusals"] == 0 and front[0]["kl"] == 0.35
+
+
+def test_parse_trial_log_reads_master_scorer_format():
+    # Master's scorer plugins print Keywords before KL divergence, and the
+    # baseline metrics appear before any trial starts.
+    log = """
+[bold]Metrics:[/]
+  * Keywords: 96/100
+  * KL divergence: 0 (by definition)
+
+Running trial 1 of 3...
+  * Metrics:
+    * Keywords: 12/100
+    * KL divergence: 0.1191
+Running trial 2 of 3...
+  * Metrics:
+    * Keywords: 2/100
+    * KL divergence: 0.2400
+Running trial 3 of 3...
+  * Metrics:
+    * Keywords: 12/100
+    * KL divergence: 0.3000
+"""
+    data = parse_trial_log(log)
+    assert data["completed"] == 3
+    front = data["front"]
+    # Trial 3 is dominated by trial 1 (same keyword count, worse KL).
+    assert [trial["trial"] for trial in front] == [2, 1]
+    assert front[1]["refusals"] == 12 and front[1]["denominator"] == 100
+    assert front[1]["kl"] == 0.1191
 
 
 def test_render_config_reexport_uses_source_checkpoint_and_front_index(tmp_path: Path):

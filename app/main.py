@@ -590,12 +590,17 @@ def dataset_section(header: str, source: tuple[str, str, str]) -> list[str]:
     ]
 
 
-def parse_ara_trials(log_text: str) -> dict:
-    """Parse per-trial scores from an ara job log and build the Pareto front.
+def parse_trial_log(log_text: str) -> dict:
+    """Parse per-trial scores from a job log and build the Pareto front.
 
-    Mirrors upstream's selection exactly (completed trials sorted by refusals
-    then KL, keeping strictly improving KL), so a front entry's position is the
-    trial_index the managed patch will select on re-export.
+    Both channels print "Running trial N of M"; ara then logs "KL divergence:"
+    followed by "Refusals: n/m", while master's scorer plugins log
+    "Keywords: n/m" followed by "KL divergence:", so a record closes once both
+    numbers are in rather than on a fixed last line. Mirrors upstream's
+    selection exactly (completed trials sorted by refusals then KL, keeping
+    strictly improving KL), so a front entry's position is the trial_index
+    heretic will select on re-export — and the exporter verifies the restored
+    trial number against the log, so an ordering mismatch fails loudly.
     """
     trials: list[dict] = []
     current: dict | None = None
@@ -611,13 +616,12 @@ def parse_ara_trials(log_text: str) -> dict:
         match = re.search(r"KL divergence: ([0-9.]+)", line)
         if match:
             current["kl"] = float(match.group(1))
-            continue
-        match = re.search(r"Refusals: (\d+)/(\d+)", line)
+        match = re.search(r"(?:Refusals|Keywords): (\d+)/(\d+)", line)
         if match:
             current["refusals"] = int(match.group(1))
             current["denominator"] = int(match.group(2))
-            if "kl" in current:
-                trials.append(current)
+        if "kl" in current and "refusals" in current:
+            trials.append(current)
             current = None
     front: list[dict] = []
     best_kl = float("inf")
@@ -1072,7 +1076,8 @@ class JobManager:
                         job.status = "failed"
                         job.error = (
                             f"匯出未經 snapshot 還原或 trial 不符（預期 trial {expected_trial}）。"
-                            "請先在「Heretic 版本」頁更新 ara slot 套用最新 patch，再重新匯出。"
+                            f"請先在「Heretic 版本」頁更新 {job.heretic_channel or 'master'} "
+                            "slot 套用最新 patch，再重新匯出。"
                         )
                 job.exit_code = exit_code
         except Exception as exc:
@@ -1158,9 +1163,11 @@ class JobManager:
     ) -> bool:
         """Whether the log shows Heretic restored the requested trial.
 
-        Guards against an ara slot that predates the patch which keeps the
-        invocation's trial_index over the checkpoint-stored one — that slot
-        would silently export front entry 0 instead. With require_snapshot,
+        Master prints the restore line natively; on ara it comes from the
+        managed automation patch. Guards against a slot whose selection logic
+        disagrees with the parsed front ordering (or, on ara, predates the
+        patch that keeps the invocation's trial_index over the
+        checkpoint-stored one) — either would silently export the wrong entry. With require_snapshot,
         additionally demands the snapshot-restore line: ARA-LoRA re-runs LBFGS
         from process-local warm-start state, so an export that re-ran the
         ablation instead of loading the stored snapshot is corrupt.
@@ -1653,14 +1660,11 @@ def retry_job(job_id: str):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-def ara_job_or_error(job_id: str) -> Job:
+def reexport_job_or_error(job_id: str) -> Job:
     try:
-        job = manager.get(job_id)
+        return manager.get(job_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="找不到任務") from exc
-    if (job.heretic_channel or "master") != "ara":
-        raise HTTPException(status_code=400, detail="trial 匯出目前僅支援 ARA 任務")
-    return job
 
 
 def ara_snapshot_file(job_id: str, trial_number: int) -> Path:
@@ -1675,8 +1679,8 @@ def ara_snapshot_file(job_id: str, trial_number: int) -> Path:
 
 @app.get("/api/jobs/{job_id}/trials")
 def get_job_trials(job_id: str):
-    job = ara_job_or_error(job_id)
-    data = parse_ara_trials(manager.log_text(job_id))
+    job = reexport_job_or_error(job_id)
+    data = parse_trial_log(manager.log_text(job_id))
     data["exportable"] = (
         job.status == "completed" and (CHECKPOINT_DIR / job_id).is_dir()
     )
@@ -1690,7 +1694,7 @@ def get_job_trials(job_id: str):
 
 @app.post("/api/jobs/{job_id}/reexport", status_code=202)
 def create_job_reexport(job_id: str, request: TrialExportRequest):
-    job = ara_job_or_error(job_id)
+    job = reexport_job_or_error(job_id)
     if job.status != "completed":
         raise HTTPException(status_code=409, detail="只有已完成的任務可以重新匯出")
     if not (CHECKPOINT_DIR / job_id).is_dir():
@@ -1698,7 +1702,7 @@ def create_job_reexport(job_id: str, request: TrialExportRequest):
     active_eval = eval_manager.active()
     if active_eval is not None and active_eval.uses_local_gpu():
         raise HTTPException(status_code=409, detail="評測執行中，GPU 使用中，請稍後再試")
-    front = parse_ara_trials(manager.log_text(job_id))["front"]
+    front = parse_trial_log(manager.log_text(job_id))["front"]
     invalid = [index for index in request.front_indices if index >= len(front)]
     if invalid:
         raise HTTPException(status_code=400, detail=f"front index 超出範圍：{invalid}")

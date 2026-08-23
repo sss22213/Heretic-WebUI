@@ -532,7 +532,7 @@ function updateSelected() {
   $('#cancelButton').hidden = !['queued', 'running'].includes(job.status);
   $('#retryButton').hidden = job.status !== 'failed';
   $('#exportTrialsButton').hidden = !(
-    job.status === 'completed' && job.heretic_channel === 'ara' && !job.request.reexport_source
+    job.status === 'completed' && !job.request.reexport_source
   );
   // A re-export request is a handful of trial fields, not a runnable job setup.
   $('#loadSettingsButton').hidden = Boolean(job.request.reexport_source);
